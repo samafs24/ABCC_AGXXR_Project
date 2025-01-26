@@ -1,0 +1,333 @@
+---
+
+```markdown
+---
+title: "Combine Gene Info Tables"
+author: "Alicia"
+date: "2024-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+We generated counts using the raw data. In the original paper, gene symbols were assigned to genes for figure interpretation. An annotation file containing this information for our reference genome is available on GenBank.
+
+## Data Preparation
+
+### Clear Environment and Load Libraries
+```{r}
+# Clear the environment
+rm(list = ls())
+
+# Load required libraries
+library(readr)
+library(data.table)
+library(DESeq2)
+library(dplyr)
+library(ggplot2)
+```
+
+### Define File Paths
+```{r}
+# Define file paths
+gene_counts_file <- "/Users/aliciahobdell/Desktop/7BBG1002_bioinf/abcc_project/data/processed_data/count_files/all_samples_counts.txt"
+genbank <- "/Users/aliciahobdell/Desktop/7BBG1002_bioinf/abcc_project/data/processed_data/count_files/genbank_annotation.tsv"
+```
+
+### Load and Clean Gene Counts Data
+```{r}
+gene_counts <- read.delim(
+  file = gene_counts_file,
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  comment.char = "#",
+  na.strings = c("", "NA")
+)
+colnames(gene_counts) <- c(
+  "locus_tag", "accession", "begin", "end", "orientation", "length",
+  "ERR2713020", "ERR2713021", "ERR2713022", "ERR2713023", "ERR2713024", "ERR2713025"
+)
+head(gene_counts)
+```
+
+### Load and Clean Annotation Data
+```{r}
+annotation <- read.delim(
+  file = genbank,
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  na.strings = c("", "NA")
+)
+colnames(annotation) <- c(
+  "accession", "begin", "end", "chromosome", "orientation", "name", "symbol",
+  "gene_id", "gene_type", "transcript_accession",
+  "protein_accession", "protein_length", "locus_tag"
+)
+# Update orientation values
+annotation$orientation <- ifelse(
+  annotation$orientation == "plus", "+",
+  ifelse(annotation$orientation == "minus", "-", annotation$orientation)
+)
+head(annotation)
+```
+
+## Merging and Cleaning Data
+
+### Merge Counts and Annotation Data
+```{r}
+merged_data <- merge(
+  x = gene_counts,
+  y = annotation,
+  by.x = c("locus_tag", "accession", "orientation"),
+  by.y = c("locus_tag", "accession", "orientation"),
+  all.x = FALSE,
+  all.y = FALSE
+)
+head(merged_data)
+```
+
+### Clean Merged Data
+```{r}
+# Remove columns with only NA or 0 values
+merged_data <- merged_data[, colSums(is.na(merged_data)) < nrow(merged_data)]
+merged_data <- merged_data[, colSums(merged_data == 0, na.rm = TRUE) < nrow(merged_data)]
+
+# Reorder columns alphabetically
+merged_data <- merged_data[, order(names(merged_data))]
+head(merged_data)
+```
+
+## Discrepancy Analysis of Coordinates
+```{r}
+begin_diff <- unique(merged_data$begin.x - merged_data$begin.y)
+end_diff <- unique(merged_data$end.x - merged_data$end.y)
+range_diff <- unique((merged_data$end.x - merged_data$begin.x) -
+                     (merged_data$end.y - merged_data$begin.y))
+
+cat("Begin coordinate differences:", begin_diff, "\n")
+cat("End coordinate differences:", end_diff, "\n")
+cat("Range differences:", range_diff, "\n")
+```
+
+### Keep Relevant Data
+```{r}
+merged_data <- merged_data %>% select(-begin.x, -begin.y)
+head(merged_data)
+```
+
+## Handling Gene Symbols
+```{r}
+merged_data$symbol <- ifelse(is.na(merged_data$symbol), merged_data$locus_tag, merged_data$symbol)
+
+# Identify duplicate symbols
+repeated_symbols <- merged_data$symbol[duplicated(merged_data$symbol)]
+unique_repeated_symbols <- unique(repeated_symbols)
+rows_with_repeats <- merged_data[merged_data$symbol %in% unique_repeated_symbols, ]
+
+# View repeated symbols
+View(rows_with_repeats)
+```
+
+## Preparing for DESeq2 Analysis
+
+### Subset Counts Data
+```{r}
+counts <- merged_data[, c("locus_tag", "ERR2713020", "ERR2713021", "ERR2713022", "ERR2713023", "ERR2713024", "ERR2713025")]
+rownames(counts) <- counts$locus_tag
+counts$locus_tag <- NULL
+head(counts)
+```
+
+### Load Sample Metadata
+```{r}
+sdrf_path <- "/Users/aliciahobdell/Desktop/7BBG1002_bioinf/abcc_project/data/experiment_metadata/E-MTAB-7074.sdrf.txt"
+sdrf <- read_tsv(sdrf_path)
+
+condition <- sdrf[, c("Factor Value[compound]", "Comment[ENA_RUN]")]
+condition <- distinct(condition)
+colnames(condition) <- c("condition", "sample")
+head(condition)
+```
+
+### Create DESeqDataSet
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = counts, colData = condition, design = ~ condition)
+dds <- DESeq(dds)
+```
+
+### Results and Filtering
+```{r}
+results <- results(dds, alpha = 0.05)
+results_filtered <- results[which(abs(results$log2FoldChange) >= 0.585), ]
+summary(results_filtered)
+```
+```{r}
+# Convert DESeq2 results to a data frame
+results_df <- as.data.frame(results)
+results_df$locus_tag <- rownames(results_df)  # Add locus_tag as a column
+
+# Merge results with merged_data by 'locus_tag'
+merged_data_with_results <- merge(
+  merged_data,
+  results_df,
+  by = "locus_tag",
+  all.x = TRUE  # Keep all rows from merged_data, even if no match in results
+)
+
+# View the updated table
+head(merged_data_with_results)
+
+```
+
+### Visualize Results
+#### MA Plot
+```{r}
+plotMA(results)
+plotMA(results_filtered)
+```
+
+#### Volcano Plot
+```{r}
+results_df <- as.data.frame(results)
+results_df$significant <- ifelse(results_df$padj < 0.05 & abs(results_df$log2FoldChange) >= 0.585, "Yes", "No")
+
+ggplot(results_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) +
+    geom_point() +
+    theme_minimal() +
+    labs(title = "Volcano Plot", x = "Log2 Fold Change", y = "-Log10 Adjusted P-value")
+```
+
+## Save Results
+```{r}
+write.csv(as.data.frame(results_filtered), file = "DESeq2_results.csv")
+```
+
+```{r}
+# Convert DESeq2 results to a data frame
+results_df <- as.data.frame(results)
+results_df$locus_tag <- rownames(results_df)  # Add locus_tag as a column
+
+# Merge with merged_data to include gene symbols
+results_with_symbols <- merge(
+  results_df,
+  merged_data[, c("locus_tag", "symbol")],  # Include only locus_tag and symbol columns
+  by = "locus_tag",
+  all.x = TRUE
+)
+
+# Mark significant genes
+results_with_symbols$significant <- ifelse(
+  results_with_symbols$padj < 0.05 & abs(results_with_symbols$log2FoldChange) >= 0.585,
+  "Yes", "No"
+)
+
+# Install and load ggrepel (if not already installed)
+# install.packages("ggrepel")
+library(ggrepel)
+
+# Create a Volcano Plot with labels for significant genes
+ggplot(results_with_symbols, aes(x = log2FoldChange, y = -log10(padj), color = significant)) +
+  geom_point() +
+  geom_text_repel(
+    data = results_with_symbols[results_with_symbols$significant == "Yes", ],
+    aes(label = symbol),  # Add gene symbol labels
+    max.overlaps = 10     # Control the number of overlapping labels
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Volcano Plot",
+    x = "Log2 Fold Change",
+    y = "-Log10 Adjusted P-value"
+  )
+# Merge gene symbols with DESeq2 results
+results_with_symbols <- merge(
+  as.data.frame(results),
+  merged_data[, c("locus_tag", "symbol")],  # Include gene symbols
+  by.x = "row.names",                      # Use row names as the key
+  by.y = "locus_tag",
+  all.x = TRUE
+)
+colnames(results_with_symbols)[1] <- "locus_tag"  # Rename merged key column
+
+# Mark significant genes (using plotMA's default significance threshold)
+results_with_symbols$significant <- ifelse(
+  results_with_symbols$padj < 0.1, "Yes", "No"
+)
+
+# Load ggrepel for labeling
+library(ggrepel)
+
+# Create MA plot with ggplot2
+ggplot(results_with_symbols, aes(x = baseMean, y = log2FoldChange, color = significant)) +
+  geom_point(alpha = 0.8) +  # Add points
+  geom_text_repel(
+    data = results_with_symbols[results_with_symbols$significant == "Yes", ],  # Only label significant genes
+    aes(label = symbol),  # Use gene symbol as label
+    max.overlaps = 10,    # Avoid too many overlapping labels
+    size = 3
+  ) +
+  scale_x_continuous(trans = "log10") +  # Log-scale for x-axis (like plotMA)
+  theme_minimal() +
+  labs(
+    title = "MA Plot with Gene Symbol Labels",
+    x = "Mean of Normalized Counts (log scale)",
+    y = "Log2 Fold Change"
+  )
+
+
+```
+```{r}
+library(ggplot2)
+library(ggrepel)
+
+# Merge results with gene symbols
+results_with_symbols <- merge(
+  as.data.frame(results),
+  merged_data[, c("locus_tag", "symbol")],
+  by.x = "row.names",
+  by.y = "locus_tag",
+  all.x = TRUE
+)
+colnames(results_with_symbols)[1] <- "locus_tag"
+
+# Create a new grouping column based on significance and log2FoldChange
+results_with_symbols$group <- ifelse(
+  results_with_symbols$padj < 0.05 & results_with_symbols$log2FoldChange > 0, "Significant Positive",
+  ifelse(
+    results_with_symbols$padj < 0.05 & results_with_symbols$log2FoldChange < 0, "Significant Negative",
+    "Not Significant"
+  )
+)
+
+# Create the plot
+ggplot(results_with_symbols, aes(x = log2(baseMean), y = log2FoldChange, color = group)) +
+  geom_point(alpha = 0.8, size = 0.5) +  # Points for all data
+  geom_text_repel(
+    data = results_with_symbols[results_with_symbols$group != "Not Significant", ],  # Label significant points
+    aes(label = symbol),
+    max.overlaps = 20,
+    size = 3
+  ) +
+  scale_color_manual(
+    values = c(
+      "Significant Positive" = "purple",
+      "Significant Negative" = "red",
+      "Not Significant" = "grey"
+    )
+  ) +
+  theme_minimal() +
+  labs(
+    title = "MA Plot with Split Significant Groups",
+    x = "A-value (log2 base mean)",
+    y = "M-value (log2 fold change)"
+  ) +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 10)
+  )
+```
+

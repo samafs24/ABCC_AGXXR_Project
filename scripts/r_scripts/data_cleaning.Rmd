@@ -1,0 +1,384 @@
+---
+title: "Combine Gene Info tables"
+author: "Alicia"
+date: "2024-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+We generated counts using the raw data. In the original paper, they assigned gene symbols to their genes for interpretation in figures. An annotation file containing this information for our reference genome is available on GenBank. 
+```{r}
+# Clear the environment
+rm(list = ls())
+
+# Load required library
+library(dplyr)
+
+# Define file paths
+gene_counts_file <- "/Users/aliciahobdell/Desktop/7BBG1002_bioinf/abcc_project/data/processed_data/count_files/all_samples_counts.txt"
+
+genbank <- "/Users/aliciahobdell/Desktop/7BBG1002_bioinf/abcc_project/data/processed_data/count_files/genbank_annotation.tsv"
+```
+
+```{r}
+# Load and clean gene counts data
+gene_counts <- read.delim(
+  file = gene_counts_file,
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  comment.char = "#",
+  na.strings = c("", "NA") # Ensures "minus" is not interpreted as NA
+)
+head(gene_counts)
+colnames(gene_counts) <- c(
+  "locus_tag", "accession", "begin", "end", "orientation", "length",
+  "ERR2713020", "ERR2713021", "ERR2713022", "ERR2713023", "ERR2713024", "ERR2713025"
+)
+head(gene_counts)
+```
+```{r}
+# Load and clean annotation data
+annotation <- read.delim(
+  file = genbank,
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  na.strings = c("", "NA")
+)
+head(annotation)
+colnames(annotation) <- c(
+  "accession", "begin", "end", "chromosome", "orientation", "name", "symbol",
+  "gene_id", "gene_type", "transcript_accession",
+  "protein_accession", "protein_length", "locus_tag"
+)
+head(annotation)
+
+# Replace "plus" with "+" and "minus" with "-" in the orientation column to match the counts data 
+annotation$orientation <- ifelse(
+  annotation$orientation == "plus", "+",
+  ifelse(annotation$orientation == "minus", "-", annotation$orientation)
+)
+```
+```{r}
+# Merge the data on locus_tag, accession, and orientation
+merged_data <- merge(
+  x = gene_counts,
+  y = annotation,
+  by.x = c("locus_tag", "accession", "orientation"),
+  by.y = c("locus_tag", "accession", "orientation"),
+  all.x = FALSE,  
+  all.y = FALSE   # Keep only rows where locus_tag, accession, and orientation match in both gene_counts and annotation
+)
+
+head(merged_data)
+```
+```{r}
+# We can do some preliminary cleaning of our data
+# Remove columns that contain only NA values (this drops the transcript_accession column)
+merged_data <- merged_data[, colSums(is.na(merged_data)) < nrow(merged_data)]
+
+# Remove columns that contain only 0 values (this drops the gene_id column)
+merged_data <- merged_data[, colSums(merged_data == 0, na.rm = TRUE) < nrow(merged_data)]
+
+# Reorder columns alphabetically by their names
+merged_data <- merged_data[, order(names(merged_data))]
+
+head(merged_data)
+```
+
+The begin and end positions from Table X (gene counts) and Table Y (annotations) represent the same information but are not perfectly aligned. It is essential to identify the source of these discrepancies to ensure data quality and, ultimately, remove one of each to avoid redundancy.
+```{r}
+# Calculate differences in begin and end coordinates
+begin_diff <- unique(merged_data$begin.x - merged_data$begin.y)
+end_diff <- unique(merged_data$end.x - merged_data$end.y)
+
+# Calculate range differences
+range_diff <- unique((merged_data$end.x - merged_data$begin.x) - 
+                     (merged_data$end.y - merged_data$begin.y))
+
+cat("Begin coordinate differences:", begin_diff, "\n")
+cat("End coordinate differences:", end_diff, "\n")
+cat("Range differences:", range_diff, "\n")
+```
+ - The begin coordinate differences of 0 and 3 indicate that the start positions vary, with reads sometimes starting 3 units later.
+ - The end coordinate differences of 0 and -3 show that the end positions also vary, with reads sometimes ending 3 units earlier.
+ - The consistent range difference of -3 confirms that the reads in Table X (gene counts) are always 3 units shorter than those in Table Y (annotations), suggesting the systematic exclusion of a stop codon, regardless of the variability in the start position.
+Knowing this, we can safely remove the data from the annotation table, and keep the one from our gene_count table because that is the actual sequence that generated the alignment counts for our experiment. 
+```{r}
+# Drop 'begin.x' and 'begin.y' columns
+merged_data <- merged_data %>% select(-begin.x, -begin.y)
+
+head(merged_data)
+```
+Finally, it looks like the chromosome column contains a lot of NA values 
+```{r}
+# Count the frequency of each unique value in the chromosome field
+chromosome_counts <- table(merged_data$chromosome)
+# Print the frequencies
+print(chromosome_counts)
+```
+Research indicates that pUSA01-HOU and pUSA300HOUMR are the two plasmids present in the USA300/TCH1516 strain. While this may not be crucial to our study, it is worth noting.
+Now, in our original study, if no symbol was available, they used the locus tag as an identifier. We can do this by replacing all NA values with the correct locus tag: 
+```{r}
+merged_data$symbol <- ifelse(is.na(merged_data$symbol), merged_data$locus_tag, merged_data$symbol)
+head(merged_data)
+```
+Now we can check if gene symbols or locus tags are repeated, to see if we can identify the read counts rows based on only the gene id: 
+```{r}
+# Identify duplicate symbols
+repeated_symbols <- merged_data$symbol[duplicated(merged_data$symbol)]
+
+# View unique repeated symbols
+unique_repeated_symbols <- unique(repeated_symbols)
+
+# Display rows with repeated symbols
+rows_with_repeats <- merged_data[merged_data$symbol %in% unique_repeated_symbols, ]
+
+# View the first few rows of the repeated symbols data
+#View(rows_with_repeats)
+```
+We can't because one gene is present on both plasmids, repA. Therefore, we need to keep using the locus_tag only as identifyer for the read counts. However we now have symbols for some of the genes, which is important for interpretation of the graphs. 
+## DSEq2
+```{r}
+# Install required packages (run these lines only if the packages are not already installed)
+# install.packages("readr")
+# install.packages("data.table")
+# BiocManager::install("DESeq2")  # Uncomment if Bioconductor is not installed
+# install.packages("dplyr")
+# install.packages("ggplot2")
+
+# Load required libraries
+library(readr)
+library(data.table)
+library(DESeq2)
+library(dplyr)
+library(ggplot2)
+```
+For the DESeq part, we are only interested in the counts, and the locus tags. We can subset this part of the table as such: 
+```{r}
+# Subset specific columns into a new object called 'counts'
+counts <- merged_data[, c("locus_tag", "ERR2713020", "ERR2713021", "ERR2713022", "ERR2713023", "ERR2713024", "ERR2713025")]
+
+# View the first few rows of the 'counts' data frame
+head(counts)
+
+rownames(counts) <- counts$locus_tag
+counts$locus_tag <- NULL  # Remove 'locus_tag' from the columns
+
+# Check the updated counts matrix
+head(counts)
+```
+
+
+```{r}
+# Define the file path
+sdrf_path <- "/Users/aliciahobdell/Desktop/7BBG1002_bioinf/abcc_project/data/experiment_metadata/E-MTAB-7074.sdrf.txt"
+
+# Load the SDRF file as a tab-separated values (TSV) file
+sdrf <- read_tsv(sdrf_path)
+
+# Preview the first few rows of the loaded data
+head(sdrf)
+```
+1. **Sample Identifiers:**
+   - **Source Name:** Unique name for the sample.
+   - **Sample ID:** Links to external metadata (e.g., ERS2622981).
+   - **Biosample ID:** Connects to biosample metadata (e.g., SAMEA4803067).
+
+2. **Biological Characteristics:**
+   - **Organism:** *Staphylococcus aureus subsp. aureus USA300*.
+   - **Strain:** TCH1516.
+   - **Growth Condition:** RPMI1640 medium.
+   - **Genotype:** Wild type.
+   - **Material Type:** Whole organism.
+
+3. **Library Details:**
+   - **Layout:** Paired-end.
+   - **Selection:** Random.
+   - **Source:** Transcriptomic.
+   - **Strand:** First strand.
+   - **Strategy:** RNA-seq.
+   - **Nominal Length and Standard Deviation:** 250 bp ± 100 bp.
+   - **Orientation:** 5'-3' to 3'-5'.
+
+4. **Protocol References:**
+   - Protocols used for sample preparation and sequencing.
+
+5. **Sequencing Metadata:**
+   - **Assay Name:** Identifies the sequencing assay.
+   - **Technology Type:** Specifies sequencing type.
+   - **ENA Experiment ID:** Links to the experiment (e.g., ERX2727189).
+   - **Run Information:**
+     - **Scan Name:** Name of the FASTQ file.
+     - **Submitted File Name:** Submitted file identifier.
+     - **ENA Run ID:** Run identifier (e.g., ERR2713020).
+     - **FASTQ URI:** FTP link to access raw sequence data.
+   - **Spot Length and Read Index Base Coordinate:** Base length and read alignment specifics.
+
+6. **Experimental Factors:**
+   - **Compound Factor Value:** Compound used (e.g., AgXX373).
+   - **Dose Factor Value and Unit:** Compound dosage (e.g., 4.5 micrograms per milliliter).
+We are only interested in the ENA run identifyer and the compound (treatment vs control, which we can extract here: )
+```{r}
+condition <- sdrf[, c("Factor Value[compound]", "Comment[ENA_RUN]")]
+# Remove duplicate rows
+condition <- distinct(condition)
+# Rename the columns to 'condition' and 'sample'
+colnames(condition) <- c("condition", "sample")
+# View the first few rows
+head(condition)
+```
+# Create DESeqDataSet (dds) object from the count data (countData_clean) and metadata
+
+-   countData: raw count data.
+
+-   colData: a data frame where rows correspond to the columns of countData. It has metadata about the samples, i.e: experimental conditions.
+
+-   design: This sets the experimental design for differential expression analysis. The formula "\~ condition" indicates that the analysis should focus on differences in the condition variable.
+
+```{r}
+# Create DESeqDataSet
+mat <- counts
+head(mat)
+colData <- condition[,"condition"] 
+head(colData)
+dds <- DESeqDataSetFromMatrix(countData = mat, colData = colData, design = ~ condition)
+dds <- DESeq(dds)
+dds
+
+```
+# Get results with specified alpha level
+
+Set the significance level and log2-fold change cut-offs as described in the study. In our case its 0.05.
+
+-   results() : This extracts the results of the differential expression analysis after running DESeq().
+-   alpha = 0.05: Sets the significance level to 0.05
+```{r}
+results <- results(dds, alpha = 0.05)
+head(results)
+
+```
+# Filter results based on log2-fold change cut-offs
+
+0.585 is log2(1.5)
+
+This code filters the results table to include only genes with a log2 fold change greater than or equal to ± 0.585, corresponding to a fold change of at least 1.5 (upregulated or downregulated).
+
+-   results\$log2FoldChange : extracts the log2 fold change values from the results table.
+-   abs() : calculates the absolute value of the log2 fold changes. Absolute value ensures that both upregulated (log2\>0) and downregulated (log2\<0) genes are included.
+```{r}
+results_filtered <- results[which(abs(results$log2FoldChange) >= 0.585), ]
+results_filtered
+```
+
+# Summary of results
+
+to see how many genes are significantly up-regulated and down-regulated.
+
+```{r}
+summary(results_filtered)
+```
+
+# MA plot
+
+-   Generated both results and the filtered results.
+
+
+```{r}
+plotMA(results_filtered)
+plotMA(results)
+```
+
+# Volcano plot
+
+-   results_df: Converts the "results" object from earlier into a standard R data frame (results_df). This makes it easier to manipulate and visualise with tools ggplot2
+
+-   ifelse: A vectorised conditional statement. (Similar to 'test' but with yes or no instead of TRUE and FALSE)
+
+-   padj\<0.05: Select genes with statistically significant adjusted p-values.
+
+-   (results_df\$log2FoldChange) \>= 0.585: Select genes with a biologically meaningful fold change (≥1.5).
+
+-   Assign "Yes" to genes meeting both criteria; otherwise, assign "No".
+
+-   Adds a new column significant to the data frame, categorising genes as significant or not.
+
+This will remove values outside the scale range when plotting the graph.
+
+```{r}
+results_df <- as.data.frame(results)
+results_df$significant <- ifelse(results_df$padj < 0.05 & abs(results_df$log2FoldChange) >= 0.585, "Yes", "No")
+
+ggplot(results_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) +
+    geom_point() +
+    theme_minimal() +
+    labs(title = "Volcano Plot", x = "Log2 Fold Change", y = "-Log10 Adjusted P-value")
+
+```
+
+# Save results to CSV
+
+Important notes:
+
+-   Make sure to adjust the condition factor in the colData data frame to match our experimental design.
+
+-   The log2-fold change cut-off of 0.585 corresponds to a fold-change of ±1.5, as specified in the study.
+
+-   Make sure that our count data is properly formatted and that the row names correspond to gene identifiers.
+
+```{r}
+write.csv(as.data.frame(results_filtered), file = "DESeq2_results.csv")
+```
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+
+# Merge results with gene symbols
+results_with_symbols <- merge(
+  as.data.frame(results),
+  merged_data[, c("locus_tag", "symbol")],
+  by.x = "row.names",
+  by.y = "locus_tag",
+  all.x = TRUE
+)
+colnames(results_with_symbols)[1] <- "locus_tag"
+
+# Create a new grouping column based on significance and log2FoldChange
+results_with_symbols$group <- ifelse(
+  results_with_symbols$padj < 0.05 & results_with_symbols$log2FoldChange > 0, "Significant Positive",
+  ifelse(
+    results_with_symbols$padj < 0.05 & results_with_symbols$log2FoldChange < 0, "Significant Negative",
+    "Not Significant"
+  )
+)
+
+# Create the plot
+ggplot(results_with_symbols, aes(x = log2(baseMean), y = log2FoldChange, color = group)) +
+  geom_point(alpha = 0.8, size = 0.5) +  # Points for all data
+  geom_text_repel(
+    data = results_with_symbols[results_with_symbols$group != "Not Significant", ],  # Label significant points
+    aes(label = symbol),
+    max.overlaps = 20,
+    size = 3
+  ) +
+  scale_color_manual(
+    values = c(
+      "Significant Positive" = "purple",
+      "Significant Negative" = "red",
+      "Not Significant" = "grey"
+    )
+  ) +
+  theme_minimal() +
+  labs(
+    title = "MA Plot with Split Significant Groups",
+    x = "A-value (log2 base mean)",
+    y = "M-value (log2 fold change)"
+  ) +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 10)
+  )
+```
+

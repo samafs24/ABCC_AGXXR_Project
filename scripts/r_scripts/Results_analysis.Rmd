@@ -1,0 +1,217 @@
+## Extract and Analyze Results
+After running **`DESeq()`**, we use the **`results()`** function to extract the analysis results, such as log2-fold changes, p-values, and adjusted p-values. We can specify the significance level using the `alpha` parameter, which sets the threshold for adjusted p-values.
+```{r}
+# Extract the results of differential expression analysis with alpha = 0.05
+res <- results(dds, alpha = 0.05)
+# Preview the first few rows of the results
+head(res)
+```
+We can explore our DESeq2 results using the **`summary()`** function, which provides an overview of the differential expression analysis. This includes the total number of genes or features tested, the significance threshold (`alpha`), the number of significantly up-regulated and down-regulated genes, and any genes with NA values, often due to low counts or filtering criteria.
+```{r}
+# Summarize the results to check the number of significant genes
+summary(res)
+```
+
+### Filtering the Results
+Our reference paper specifies that the differential RNA-seq data was evaluated *"using an adjusted p-value cut-off of P ≤ 0.05 and a signal intensity ratio (M-value) cut-off of ≥ 0.6 or ≤ −0.6 (fold-change of ± 1.5). The cut-off was determined as ± 0.6 since the majority of differentially transcribed regulons fall in this range that are related to the redox-active mode of action of AGXX®."*
+Based on these criteria, we can group the results into three categories:
+
+1. **Significantly Induced**: Genes with a log2 fold change > 0.585 and an adjusted p-value < 0.05.
+2. **Significantly Repressed**: Genes with a log2 fold change < -0.585 and an adjusted p-value < 0.05.
+3. **No Fold-Changes**: Genes that do not meet these criteria.
+
+The value `0.585` is the log2 transformation of a fold change of 1.5, indicating an expression level change of ±1.5 times compared to the baseline.
+
+- **`results$log2FoldChange`**: Extracts the log2 fold change values from the results table. 
+```{r}
+# Create a new grouping column based on significance and log2FoldChange
+res$group <- ifelse(
+  res$padj < 0.05 & res$log2FoldChange > 0.585, "Significantly induced",
+  ifelse(
+    res$padj < 0.05 & res$log2FoldChange < -0.585, "Significantly repressed",
+    "No fold-changes"
+  )
+)
+
+```
+We can now use these groupings to assign colors to the data, making it easier to visualize the gene expression changes in graphs
+
+## Visualization 
+## Adding Labels 
+```{r}
+# Convert results to a tibble for easier manipulation and ggplot2 visualization
+res_df <- as_tibble(res, rownames = "locus_tag")  # Convert to a tibble and add "locus_tag" as a column
+
+# Calculate the log2baseMean and rename it to a_value
+res_df <- res_df %>%
+  mutate(a_value = log2(baseMean + 1))  # Avoid log2(0) by adding 1
+
+# Rename columns for clarity and consistency
+colnames(res_df) <- c(
+  "locus_tag",        # Keep the same name
+  "base_mean",        # Rename baseMean to base_mean
+  "m_value",          # Rename log2FoldChange to m_value
+  "standard_error",   # Rename lfcSE to standard_error
+  "wald_statistic",   # Rename stat to wald_statistic
+  "p_value",          # Rename pvalue to p_value
+  "adjusted_p_value", # Rename padj to adjusted_p_value
+  "group",            # Keep the same name
+  "a_value"           # Include a_value column at the end
+)
+
+# Calculate fold change from m_value (log2 fold change)
+res_df <- res_df %>%
+  mutate(fold_change = 2^m_value)  # Compute fold change
+
+# Merge data frames res_df and S1 by matching columns
+# "locus_tag" in res_df matches "usa300_numbers" in S1
+merged_data <- merge(
+  x = res_df,
+  y = S1,
+  by.x = "locus_tag",  # Match "locus_tag" in res_df
+  by.y = "usa300_numbers",  # Match "usa300_numbers" in S1
+  all.x = TRUE,  # Keep all rows from res_df
+  all.y = FALSE  # Exclude unmatched rows from S1
+)
+
+# Reorder the columns alphabetically, keeping "locus_tag" as the row name
+rownames(merged_data) <- merged_data$locus_tag  # Set "locus_tag" as row names
+merged_data$locus_tag <- NULL                   # Remove "locus_tag" column
+merged_data <- merged_data[, order(colnames(merged_data))]  # Reorder columns alphabetically
+
+# View the reordered data frame
+head(merged_data)
+```
+
+#### MA Plot 
+The plotMA() function in the DESeq2 package creates an MA plot, which is a scatterplot used to visualize differential expression results. It plots the Log2 fold changes (y-axis) against the mean expression levels, or average of normalized counts (x-axis). 
+```{r}
+plotMA(res)
+```
+To color the points based on custom groupings (e.g., "significantly induced," "significantly repressed," and "no fold-changes"), we need to create a custom MA plot using ggplot2, because plotMA() doesn't support custom group-based coloring. 
+```{r}
+# Filter out rows with NA values in log2FoldChange or log2baseMean to remove these from the plots 
+merged_data <- merged_data %>%
+  filter(!is.na(m_value.x) & !is.na(a_value.x) & !is.na(group))
+library(ggrepel)
+
+# Create a custom MA plot
+ggplot(merged_data, aes(x = a_value.x, y = m_value.x, color = group)) +
+  geom_point(alpha = 0.8, size = 1) +
+  geom_text_repel(
+    data = merged_data[merged_data$group == "Significantly induced", ],  # Label significant points
+    aes(label = gene_symbol),
+    color = "black",  # Ensures the text labels are black
+    max.overlaps = 10,
+    size = 3) +
+  scale_color_manual(
+    name = "Differential Expression",  # Update the legend title
+    values = c(
+      "Significantly induced" = "yellow",
+      "Significantly repressed" = rgb(130, 130, 130, maxColorValue = 255),  # Dark gray
+      "No fold-changes" = rgb(220, 220, 220, maxColorValue = 255)           # Light gray
+    )
+  ) +
+  labs(
+    title = "Custom MA Plot",
+    x = "A-value (log2 base mean)",
+    y = "M-value (log2-fold change)"
+  ) +
+  scale_x_continuous(breaks = seq(0, max(merged_data$a_value.x, na.rm = TRUE), by = 2)) +  # X-axis labels every 2 units
+  scale_y_continuous(breaks = seq(floor(min(merged_data$a_value.x, na.rm = TRUE)), 
+                                  ceiling(max(merged_data$a_value.x, na.rm = TRUE)), 
+                                  by = 2)) +  # Y-axis labels every 2 units
+  theme_minimal()
+```
+#### Volcano Plot
+```{r}
+
+ggplot(merged_data, aes(x = m_value.x, y = -log10(adjusted_p_value.x), color = group)) +
+  geom_point(alpha = 0.8, size = 1) +
+  scale_color_manual(
+    name = "Differential Expression",  # Update the legend title
+    values = c(
+      "Significantly induced" = "yellow",
+      "Significantly repressed" = rgb(130, 130, 130, maxColorValue = 255),  # Dark gray
+      "No fold-changes" = rgb(220, 220, 220, maxColorValue = 255)           # Light gray
+    )
+  ) +
+  theme_minimal() +  # Use a minimal theme for a clean appearance
+  labs(
+    title = "Volcano Plot", 
+    x = "Log2 Fold Change", 
+    y = "-Log10 Adjusted P-value"
+  )
+```
+
+```{r}
+library(dplyr)
+library(tibble)
+
+# Merge counts and S1 data
+regulon_data <- merge(
+  x = counts,
+  y = S1,
+  by.x = "locus_tag",         # Match "locus_tag" in counts
+  by.y = "usa300_numbers",    # Match "usa300_numbers" in S1
+  all.x = TRUE,               # Keep all rows from counts
+  all.y = FALSE               # Exclude unmatched rows from S1
+)
+
+# Aggregate counts by regulon
+regulon_counts <- regulon_data %>%
+  filter(!is.na(regulon)) %>%  # Exclude rows where 'regulon' is NA
+  group_by(regulon) %>%
+  summarize(
+    ERR2713020 = mean(ERR2713020, na.rm = TRUE),
+    ERR2713021 = mean(ERR2713021, na.rm = TRUE),
+    ERR2713022 = mean(ERR2713022, na.rm = TRUE),
+    ERR2713023 = mean(ERR2713023, na.rm = TRUE),
+    ERR2713024 = mean(ERR2713024, na.rm = TRUE),
+    ERR2713025 = mean(ERR2713025, na.rm = TRUE)
+  )
+
+head(regulon_counts)
+
+# Convert regulons to row names
+regulon_matrix <- regulon_counts %>%
+  column_to_rownames("regulon") %>%
+  as.matrix()
+
+regulon_matrix <- round(regulon_matrix)
+
+head(regulon_matrix)
+head(colData)
+head(colData$compound)
+
+# Create DESeqDataSet object
+dds <- DESeqDataSetFromMatrix(countData = regulon_matrix, colData = colData, design = ~ compound)
+# Perform differential expression analysis
+dds <- DESeq(dds)
+
+# Extract results with adjusted p-value threshold (alpha = 0.05)
+res <- results(dds, alpha = 0.05)
+
+# Preview results
+head(res)
+summary(res)
+# Regularized log transformation
+rld <- rlog(dds)
+
+# Select top regulons based on adjusted p-value
+top_regulons <- head(order(res$padj), 15)
+
+# Create heatmap
+pheatmap(
+  assay(rld)[top_regulons, ], 
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  show_colnames = TRUE
+)
+
+```
+### Save results to CSV
+```{r}
+write.csv(merged_data, file = paste0(path, "results/DESeq2_results.csv"))
+```

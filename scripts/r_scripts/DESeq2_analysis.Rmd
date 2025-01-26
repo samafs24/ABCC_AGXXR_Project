@@ -1,0 +1,335 @@
+---
+title: "Data Cleaning & DESeq2"
+author: "Alicia & Rahim"
+date: "2024-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setting up the Environment
+
+```{r}
+# Clear the environment to start with a clean workspace
+rm(list = ls())
+
+# Define the base project path
+path <- "/Users/sama/Documents/ABCC_AGXX_Project/"
+
+# Install required libraries (uncomment to install if not already installed)
+# install.packages(c("readxl", "readr", "data.table", "DESeq2", "dplyr", "ggplot2", "tibble"))
+
+# Load libraries
+library(readr)       # For reading delimited files
+library(readxl)      # For reading Excel files
+library(tibble)      # For working with tidy data frames
+library(data.table)  # For efficient data manipulation
+library(dplyr)       # For general data wrangling
+library(DESeq2)      # For differential gene expression analysis
+library(ggplot2)     # For creating visualizations
+```
+
+### Defining File Paths
+
+```{r}
+# Define file paths for input data
+counts_path <- paste0(path, "data/processed_data/count_files/all_samples_counts.txt")   # Path to counts data
+genbank_path <- paste0(path, "data/processed_data/count_files/genbank_annotation.tsv")  # Path to GenBank annotations
+S1_path <- paste0(path, "data/experiment_metadata/S1.XLSX")                             # Path to experimental metadata (Excel)
+sdrf_path <- paste0(path, "data/experiment_metadata/E-MTAB-7074.sdrf.txt")              # Path to SDRF metadata file
+```
+
+### Loading Input Data
+
+#### Counts Data
+
+```{r}
+# Load input data from specified file paths using appropriate functions for .xlsx, .tsv, and .txt files.
+# Rename columns to improve clarity, maintain consistency, and simplify downstream analysis.
+counts <- read.delim(# Load the counts file
+  file = counts_path,
+  comment.char = "#"
+)
+colnames(counts) <- c(
+  "locus_tag", "accession", "begin", "end", "orientation", "length",
+  "ERR2713020", "ERR2713021", "ERR2713022", "ERR2713023", "ERR2713024", "ERR2713025"
+)
+head(counts)
+```
+
+#### GenBank Annotations
+
+```{r}
+genbank <- read.delim( # Load the GenBank annotation file
+  file = genbank_path
+)
+colnames(genbank) <- c(
+  "accession", "begin", "end", "chromosome", "orientation", "name", "symbol",
+  "gene_id", "gene_type", "transcript_accession", "protein_accession",
+  "protein_length", "locus_tag"
+)
+head(genbank)
+```
+
+#### Supplementary Table 1 (S1)
+
+```{r}
+S1 <- read_excel( # Load the S1 experimental metadata from an Excel file
+  S1_path,
+  skip = 1
+)
+colnames(S1) <- c(
+  "usa300_numbers", "col_numbers", "gene_symbol", "operon",
+  "regulon", "function", "base_mean", "a_value", "m_value",
+  "fold_change", "standard_error", "wald_statistic", "p_value",
+  "adjusted_p_value"
+)
+head(S1) # Load the SDRF metadata file
+```
+
+#### Experiment Metadata (SDRF)
+
+```{r}
+sdrf <- read_tsv(
+  sdrf_path
+)
+colnames(sdrf) <- c(
+  "source_name", "ena_sample", "biosd_sample", "organism", "strain",
+  "growth_condition", "genotype", "material_type", "protocol_ref_9",
+  "protocol_ref_10", "protocol_ref_11", "protocol_ref_12", "protocol_ref_13",
+  "extract_name", "library_layout", "library_selection", "library_source",
+  "library_strand", "library_strategy", "nominal_length", "nominal_sdev",
+  "orientation", "protocol_ref_23", "performer", "assay_name",
+  "technology_type", "ena_experiment", "scan_name", "submitted_file_name",
+  "ena_run", "fastq_uri", "spot_length", "read_index_1_base_coord",
+  "compound", "dose", "dose_unit"
+)
+head(sdrf)
+```
+
+## DESeq2
+
+The `DESeqDataSetFromMatrix` function in DESeq2 creates a dataset object from: 1. `countData`: A matrix or data frame containing raw transcript counts for each gene across all samples, with rows representing genes and columns representing samples. 2. `colData`: A data frame containing metadata about the samples, such as their experimental conditions. The SDRF metadata file provides information linking samples to their respective experimental conditions (e.g., treatment or control).
+
+### Prepare countData
+
+```{r}
+# Extract relevant columns from counts and set locus tags as row names 
+countData <- counts %>%
+  select(locus_tag, ERR2713020:ERR2713025) %>%  # Select locus tags and sample columns
+  column_to_rownames(var = "locus_tag")          # Set locus_tag as row names and remove the column
+head(countData)
+```
+
+The `countData` matrix now stores transcript counts for each gene (rows) across all samples (columns).
+
+### Prepare colData
+
+```{r}
+# Extract relevant columns from sdrf 
+colData <- distinct(sdrf[, c("compound", "ena_run")])
+head(colData)
+```
+
+The `colData` data frame corresponds to the columns of countData and contains the compound variable indicating the treatment condition.
+
+```{r}
+# Relevel the condition factor to set "control" as the reference level
+colData$compound <- relevel(factor(colData$compound), ref = "none")
+
+# Confirm the updated levels
+levels(colData$compound)  # Should now show "control" as the first level
+
+```
+
+### Create and Analyze the DESeq2 Dataset
+
+Once the data is organized, we create a `DESeqDataSetFromMatrix` object and specify the experimental design for differential expression analysis.
+
+-   The `design = ~ compound` formula specifies that, in our case, differential expression analysis focuses on differences in the compound variable (treatment vs. control).
+
+```{r}
+# Create a DESeqDataSet object 
+dds <- DESeqDataSetFromMatrix(countData = countData, colData = colData, design = ~ compound)
+head(dds)
+
+# Perform differential expression analysis
+dds <- DESeq(dds)
+head(dds)
+```
+
+### Extract and Analyze Results
+
+After running **`DESeq()`**, we use the **`results()`** function to extract the analysis results, such as log2-fold changes, p-values, and adjusted p-values. We can specify the significance level using the `alpha` parameter, which sets the threshold for adjusted p-values.
+
+```{r}
+# Extract the results of differential expression analysis with alpha = 0.05
+res <- results(dds, alpha = 0.05)
+# Preview the first few rows of the results
+head(res)
+```
+
+We can explore our DESeq2 results using the **`summary()`** function, which provides an overview of the differential expression analysis. This includes the total number of genes or features tested, the significance threshold (`alpha`), the number of significantly up-regulated and down-regulated genes, and any genes with NA values, often due to low counts or filtering criteria.
+
+```{r}
+# Summarize the results to check the number of significant genes
+summary(res)
+```
+
+### Filtering the Results
+
+Our reference paper specifies that the differential RNA-seq data was evaluated *"using an adjusted p-value cut-off of P ≤ 0.05 and a signal intensity ratio (M-value) cut-off of ≥ 0.6 or ≤ −0.6 (fold-change of ± 1.5). The cut-off was determined as ± 0.6 since the majority of differentially transcribed regulons fall in this range that are related to the redox-active mode of action of AGXX®."* Based on these criteria, we can group the results into three categories:
+
+1.  **Significantly Induced**: Genes with a log2 fold change \> 0.585 and an adjusted p-value \< 0.05.
+2.  **Significantly Repressed**: Genes with a log2 fold change \< -0.585 and an adjusted p-value \< 0.05.
+3.  **No Fold-Changes**: Genes that do not meet these criteria.
+
+The value `0.585` is the log2 transformation of a fold change of 1.5, indicating an expression level change of ±1.5 times compared to the baseline.
+
+-   **`results$log2FoldChange`**: Extracts the log2 fold change values from the results table.
+
+```{r}
+# Create a new grouping column based on significance and log2FoldChange
+res$group <- ifelse(
+  res$padj < 0.05 & res$log2FoldChange > 0.585, "Significantly induced",
+  ifelse(
+    res$padj < 0.05 & res$log2FoldChange < -0.585, "Significantly repressed",
+    "No fold-changes"
+  )
+)
+
+```
+
+We can now use these groupings to assign colors to the data, making it easier to visualize the gene expression changes in graphs.
+
+## Visualization
+
+## Adding Labels
+
+```{r}
+# Convert results to a tibble for easier manipulation and ggplot2 visualization
+res_df <- as_tibble(res, rownames = "locus_tag")  # Convert to a tibble and add "locus_tag" as a column
+
+# Calculate the log2baseMean and rename it to a_value
+res_df <- res_df %>%
+  mutate(a_value = log2(baseMean + 1))  # Avoid log2(0) by adding 1
+
+# Rename columns for clarity and consistency
+colnames(res_df) <- c(
+  "locus_tag",        # Keep the same name
+  "base_mean",        # Rename baseMean to base_mean
+  "m_value",          # Rename log2FoldChange to m_value
+  "standard_error",   # Rename lfcSE to standard_error
+  "wald_statistic",   # Rename stat to wald_statistic
+  "p_value",          # Rename pvalue to p_value
+  "adjusted_p_value", # Rename padj to adjusted_p_value
+  "group",            # Keep the same name
+  "a_value"           # Include a_value column at the end
+)
+
+# Calculate fold change from m_value (log2 fold change)
+res_df <- res_df %>%
+  mutate(fold_change = 2^m_value)  # Compute fold change
+
+# Merge data frames res_df and S1 by matching columns
+# "locus_tag" in res_df matches "usa300_numbers" in S1
+merged_data <- merge(
+  x = res_df,
+  y = S1,
+  by.x = "locus_tag",  # Match "locus_tag" in res_df
+  by.y = "usa300_numbers",  # Match "usa300_numbers" in S1
+  all.x = TRUE,  # Keep all rows from res_df
+  all.y = FALSE  # Exclude unmatched rows from S1
+)
+
+# Reorder the columns alphabetically, keeping "locus_tag" as the row name
+rownames(merged_data) <- merged_data$locus_tag  # Set "locus_tag" as row names
+merged_data$locus_tag <- NULL                   # Remove "locus_tag" column
+merged_data <- merged_data[, order(colnames(merged_data))]  # Reorder columns alphabetically
+
+# View the reordered data frame
+head(merged_data)
+```
+
+#### MA Plot
+
+The plotMA() function in the DESeq2 package creates an MA plot, which is a scatterplot used to visualize differential expression results. It plots the Log2 fold changes (y-axis) against the mean expression levels, or average of normalized counts (x-axis).
+
+```{r}
+plotMA(res)
+```
+
+To color the points based on custom groupings (e.g., "significantly induced," "significantly repressed," and "no fold-changes"), we need to create a custom MA plot using ggplot2, because plotMA() doesn't support custom group-based coloring.
+
+```{r}
+# Filter out rows with NA values in log2FoldChange or log2baseMean to remove these from the plots 
+merged_data <- merged_data %>%
+  filter(!is.na(m_value.x) & !is.na(a_value.x) & !is.na(group))
+library(ggrepel)
+
+# Create a custom MA plot
+ggplot(merged_data, aes(x = a_value.x, y = m_value.x, color = group)) +
+  geom_point(alpha = 0.8, size = 1) +
+  geom_text_repel(
+    data = merged_data[merged_data$group == "Significantly induced", ],  # Label significant points
+    aes(label = gene_symbol),
+    color = "black",  # Ensures the text labels are black
+    max.overlaps = 10,
+    size = 3) +
+  scale_color_manual(
+    name = "Differential Expression",  # Update the legend title
+    values = c(
+      "Significantly induced" = "yellow",
+      "Significantly repressed" = rgb(130, 130, 130, maxColorValue = 255),  # Dark gray
+      "No fold-changes" = rgb(220, 220, 220, maxColorValue = 255)           # Light gray
+    )
+  ) +
+  labs(
+    title = "Custom MA Plot",
+    x = "A-value (log2 base mean)",
+    y = "M-value (log2-fold change)"
+  ) +
+  scale_x_continuous(breaks = seq(0, max(merged_data$a_value.x, na.rm = TRUE), by = 2)) +  # X-axis labels every 2 units
+  scale_y_continuous(breaks = seq(floor(min(merged_data$a_value.x, na.rm = TRUE)), 
+                                  ceiling(max(merged_data$a_value.x, na.rm = TRUE)), 
+                                  by = 2)) +  # Y-axis labels every 2 units
+  theme_minimal()
+```
+
+#### Volcano Plot
+
+```{r}
+
+ggplot(merged_data, aes(x = m_value.x, y = -log10(adjusted_p_value.x), color = group)) +
+  geom_point(alpha = 0.8, size = 1) +
+  scale_color_manual(
+    name = "Differential Expression",  # Update the legend title
+    values = c(
+      "Significantly induced" = "yellow",
+      "Significantly repressed" = rgb(130, 130, 130, maxColorValue = 255),  # Dark gray
+      "No fold-changes" = rgb(220, 220, 220, maxColorValue = 255)           # Light gray
+    )
+  ) +
+  theme_minimal() +  # Use a minimal theme for a clean appearance
+  labs(
+    title = "Volcano Plot", 
+    x = "Log2 Fold Change", 
+    y = "-Log10 Adjusted P-value"
+  )
+```
+
+```{r}
+# install.packages("pheatmap")
+library(pheatmap)
+rld <- rlog(dds)
+top_genes <- head(order(merged_data$adjusted_p_value.x), 20)
+pheatmap(assay(rld)[top_genes, ], cluster_rows = TRUE, show_rownames = TRUE)
+```
+
+### Save results to CSV
+
+```{r}
+write.csv(merged_data, file = paste0(path, "results/DESeq2_results.csv"))
+```

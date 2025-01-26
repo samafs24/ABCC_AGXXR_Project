@@ -1,0 +1,105 @@
+---
+title: "Heatmap"
+format: html
+editor: visual
+---
+
+```{r}
+res_df
+```
+
+
+```{r}
+
+# Apply regularized log transformation (rlog) to the DESeq2 dataset (dds)
+rlog_transformed <- rlog(dds)
+
+# Extract rlog-transformed data as a matrix
+rlog_matrix <- assay(rlog_transformed)
+
+# Convert rlog-transformed matrix to a data frame with "locus_tag" as a column
+rlog_df <- as.data.frame(rlog_matrix) %>%
+  rownames_to_column(var = "locus_tag")  # Add "locus_tag" for merging with other data
+
+# Select relevant columns ("locus_tag" and "regulon") from the results data frame
+results_subset <- res_df %>%
+  select(locus_tag, regulon)  # Keep only necessary columns
+
+# Merge rlog-transformed data with results data frame based on "locus_tag"
+rlog_df <- inner_join(
+  results_subset, 
+  rlog_df, 
+  by = "locus_tag"  # Join datasets on the "locus_tag" column
+)
+
+# Aggregate rlog data by regulon and compute the mean expression for each sample
+regulon_df <- rlog_df %>%
+  group_by(regulon) %>%  # Group by "regulon"
+  summarize(across(starts_with("ERR"), \(x) mean(x, na.rm = TRUE)))  # Compute mean for samples
+
+regulon <- unique(res_df$regulon)
+
+# Combine both upregulated and downregulated regulons
+regulons_to_plot <- c(upregulated_regulons, downregulated_regulons)
+
+# Remove rows with missing "regulon" values and include both upregulated and downregulated regulons
+regulon_df <- regulon_df %>%
+  filter(regulon %in% regulons_to_plot) %>%  # Include both upregulated and downregulated regulons
+  filter(!is.na(regulon) & regulon != "-") # Remove rows with NA in "regulon"
+
+# Convert the aggregated data into a matrix for heatmap visualization
+regulon_matrix <- regulon_df %>%
+  column_to_rownames("regulon") %>%  # Set "regulon" as row names
+  as.matrix()  # Convert data frame to matrix format
+
+# Create column annotation for the heatmap
+annotation_col <- colData %>%
+  as_tibble() %>%
+  select(ena_run, compound) %>%
+  column_to_rownames("ena_run")
+
+colnames(annotation_col)[colnames(annotation_col) == "compound"] <- "Condition"
+
+# Rename values in the 'conditions' column
+annotation_col <- annotation_col %>%
+  mutate(Condition = case_when(
+    Condition == "none" ~ "Control",   # Rename "none" to "control"
+    Condition == "AgXX373" ~ "AGXX® Treatment" # Rename "AGXX" to "treatment"
+  ))
+
+# Define the colours
+condition_colors <- list(
+  Condition = c(
+    "Control" = "yellow2", 
+    "AGXX® Treatment" = "seagreen4"  # Simplify name to avoid issues
+  )
+)
+
+annotation_col$Condition <- factor(annotation_col$Condition, levels = c("Control", "AGXX® Treatment"))
+
+
+
+# Save the heatmap as a .jpeg file
+jpeg(paste0(rootDir, "/results/figures/regulon_heatmap_both_up_and_down.jpg"), width = 12, height = 8, units = "in", res = 300)  # Adjusted size for better display
+
+# Generate the heatmap and store it in an object
+pheatmap(
+  mat = regulon_matrix, 
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  scale = "row", 
+  show_rownames = TRUE, 
+  show_colnames = TRUE,
+  annotation_col = annotation_col,
+  annotation_colors = condition_colors,
+  color = RColorBrewer::brewer.pal(11, "RdBu"),  # Using diverging color palette
+  fontsize_row = 8,  # Decrease font size for row names to avoid squashing
+  angle_row = 45,  # Rotate row names by 45 degrees for better fit
+  height = 0.5,    # Adjust row height for better spacing
+  width = 0.5      # Adjust column width for readability
+)
+
+# Close the jpeg device to save the heatmap
+dev.off()
+```
+

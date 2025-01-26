@@ -1,0 +1,194 @@
+---
+title: "DESeq2"
+format: html
+---
+
+```{r}
+
+install.packages("readr")
+install.packages("data.table")
+
+library(readr)
+
+# Load the SDRF file
+sdrf_data <- read_tsv("/Users/sama/Downloads/E-MTAB-7074.sdrf.txt")
+
+sdrf_data
+```
+
+# Install DESeq2
+
+```{r}
+BiocManager::install("DESeq2")
+
+```
+
+# Load the libraries
+
+```{r}
+
+library(DESeq2)
+library(dplyr)
+library(ggplot2)
+
+
+```
+
+# Load count data and clean.
+
+```{r}
+
+counts <- read.table("/Users/sama/Downloads/all_samples_counts.txt", header = TRUE)
+
+# Remove unnecessary columns. 
+counts <- counts[, -c(2:6)]
+
+
+# Rename the column headers
+colnames(counts) <- c("gene_ID", "ERR2713020", "ERR2713021", "ERR2713022", "ERR2713023", "ERR2713024", "ERR2713025")
+
+counts
+
+
+# Making the gene_ID an identifier and not part of the sample.
+rownames(counts) <- counts$gene_ID
+mat <- counts
+mat <- mat[, -1]
+mat
+```
+
+# Create a sample metadata data frame to describe the samples.
+
+Adjust the condition factor according to the exprimental design, in our case we have control and treatment. Control is without agxx and treatment is with agxx.
+
+colData correspond to the columns of countData. It will create a metadata.
+
+-   condition = c("control", "control", "treatment", "treatment")) : This will set the condtions to each experimental condition.
+
+```{r}
+
+
+# Create a vector with the experimental conditions
+conditions <- c("treatment", "treatment", "treatment", "control", "control", "control")
+
+# Create a DataFrame for the sample information 
+colData <- data.frame(condition = conditions)
+
+colData
+
+
+
+```
+
+```{r}
+ncol(mat)
+nrow(colData)
+
+```
+
+# Create DESeqDataSet (dds) object from the count data (countData_clean) and metadata
+
+-   countData: raw count data.
+
+-   colData: a data frame where rows correspond to the columns of countData. It has metadata about the samples, i.e: experimental conditions.
+
+-   design: This sets the experimental design for differential expression analysis. The formula "\~ condition" indicates that the analysis should focus on differences in the condition variable.
+
+```{r}
+# Create DESeqDataSet
+
+dds <- DESeqDataSetFromMatrix(countData = mat, colData = colData, design = ~ condition)
+
+dds
+```
+
+# Run the DESeq analysis
+
+```{r}
+dds <- DESeq(dds)
+dds
+```
+
+# Get results with specified alpha level
+
+Set the significance level and log2-fold change cut-offs as described in the study. In our case its 0.05.
+
+-   results() : This extracts the results of the differential expression analysis after running DESeq().
+-   alpha = 0.05: Sets the significance level to 0.05
+
+```{r}
+results <- results(dds, alpha = 0.05)
+results
+```
+
+# Filter results based on log2-fold change cut-offs
+
+0.585 is log2(1.5)
+
+This code filters the results table to include only genes with a log2 fold change greater than or equal to ± 0.585, corresponding to a fold change of at least 1.5 (upregulated or downregulated).
+
+-   results\$log2FoldChange : extracts the log2 fold change values from the results table.
+-   abs() : calculates the absolute value of the log2 fold changes. Absolute value ensures that both upregulated (log2\>0) and downregulated (log2\<0) genes are included.
+
+```{r}
+results_filtered <- results[which(abs(results$log2FoldChange) >= 0.585), ]
+results_filtered
+```
+
+# Summary of results
+
+to see how many genes are significantly up-regulated and down-regulated.
+
+```{r}
+summary(results_filtered)
+```
+
+# MA plot
+
+-   Generated both results and the filtered results.
+
+```{r}
+plotMA(results_filtered)
+plotMA(results)
+```
+
+# Volcano plot
+
+-   results_df: Converts the "results" object from earlier into a standard R data frame (results_df). This makes it easier to manipulate and visualise with tools ggplot2
+
+-   ifelse: A vectorised conditional statement. (Similar to 'test' but with yes or no instead of TRUE and FALSE)
+
+-   padj\<0.05: Select genes with statistically significant adjusted p-values.
+
+-   (results_df\$log2FoldChange) \>= 0.585: Select genes with a biologically meaningful fold change (≥1.5).
+
+-   Assign "Yes" to genes meeting both criteria; otherwise, assign "No".
+
+-   Adds a new column significant to the data frame, categorising genes as significant or not.
+
+This will remove values outside the scale range when plotting the graph.
+
+```{r}
+results_df <- as.data.frame(results)
+results_df$significant <- ifelse(results_df$padj < 0.05 & abs(results_df$log2FoldChange) >= 0.585, "Yes", "No")
+
+ggplot(results_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) +
+    geom_point() +
+    theme_minimal() +
+    labs(title = "Volcano Plot", x = "Log2 Fold Change", y = "-Log10 Adjusted P-value")
+
+```
+
+# Save results to CSV
+
+Important notes:
+
+-   Make sure to adjust the condition factor in the colData data frame to match our experimental design.
+
+-   The log2-fold change cut-off of 0.585 corresponds to a fold-change of ±1.5, as specified in the study.
+
+-   Make sure that our count data is properly formatted and that the row names correspond to gene identifiers.
+
+```{r}
+write.csv(as.data.frame(results), file = "DESeq2_results.csv")
+```

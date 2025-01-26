@@ -1,0 +1,203 @@
+---
+title: "Alicia Notes"
+format: html
+editor: visual
+---
+
+# Proccessing the SAM Files to Produce Read Counts
+
+## Generate Read Counts Using featureCounts from Subreads
+
+```{bash}
+featureCounts -t CDS -p -g gene_id -F GTF -a data/reference_genome/CP000730.gtf data/processed_data/sorted_bam_files/sorted_ERR2713020.bam -o data/processed_data/count_files/ERR2713020_counts.txt
+```
+
+-   **`-t CDS`**: Counts reads mapped to features labeled as `CDS` in the GTF file.
+
+-   before: -p -g gene_id -a data/reference_genome/CP000730.gtf
+
+**CDS (Coding DNA Sequence)** refers to the portion of a gene that is transcribed and translated into protein. It is composed of exons, which are regions of the gene that directly code for amino acids in the resulting protein.
+
+-   **`-p`**: Indicates the input BAM file contains paired-end reads.
+
+-   **`-g gene_id`**: Groups reads by the `gene_id` attribute in the GTF file.
+
+-   **`-F GTF`**: Specifies that the annotation file is in GTF format.
+
+-   **`-a .../CP000730.gtf`**: Provides the path to the annotation file.
+
+-   **`.../sorted_ERR2713020.bam`**: Input BAM file containing aligned reads.
+
+-   **`-o .../ERR2713020_counts.txt`**: Path to the output file for storing read counts.
+
+## DESeq2 in R
+
+# Install the necessary packages
+
+The script installs and loads the DESeq2 package used for RNA-Seq analysis, and dplyr and ggplot2 for data manipulation and visualisation.
+
+```{R}
+BiocManager::install("DESeq2")
+library(DESeq2)
+library(dplyr)
+library(ggplot2)
+```
+
+# Load the count data and clean the data
+
+```{R}
+counts <- read.table("/Users/sama/Downloads/all_samples_counts.txt", header = TRUE)
+
+# Remove unnecessary columns. 
+counts <- counts[, -c(2:6)]
+
+
+# Rename the column headers
+colnames(counts) <- c("gene_ID", "ERR2713020", "ERR2713021", "ERR2713022", "ERR2713023", "ERR2713024", "ERR2713025")
+counts
+
+
+# Make the gene_ID an identifier.
+rownames(counts) <- counts$gene_ID
+mat <- counts
+mat <- mat[, -1]
+mat
+
+```
+
+-   **`counts`**: A data frame that reads the count data text file.
+
+-   **`header = TRUE`**: Ensures first row is interpreted as column headers.
+
+-   **`colnames`**: Updates column names to meaningful identifiers, representing the gene IDs and corresponding sample names.
+
+-   **`rownames(counts) <- counts$gene_ID`**: Makes the gene_ID column the row names of the data frame to uniquely identify each gene.
+
+-   **`mat`**: A count matrix.
+
+-   **`mat <- counts[, -1]`**: Removes the gene_ID column from the main data frame and assigns the remaining matrix (sample counts) to mat.
+
+# Create a sample metadata data frame to describe the samples.
+
+Adjust the condition factor according to the exprimental design, in our case we have control and treatment. Control is without agxx and treatment is with agxx.
+
+```{R}
+conditions <- c("treatment", "treatment", "treatment", "control", "control", "control")
+
+# Create a DataFrame for the sample information 
+colData <- data.frame(condition = conditions)
+
+colData
+
+# Check of the row names of mat corresponds the row names of colData
+ncol(mat)
+nrow(colData)
+```
+
+-   **`conditions`**: A vector to specify the experimental group. "treatment" for first three samples and "control" for the next three samples.
+
+-   **`colData`**: A data frame using the conditions vector. Serves as a metadata linking each sample to its experimental conditions.
+
+-   **`data.frame(condition = conditions)`**: The arguement assigns values from 'conditions' vector to 'condition'
+
+-   **`ncol and nrow`**: Outputs the number of columns and row.
+
+# Create DESeqDataSet object from the count data and metadata
+
+```{R}
+dds <- DESeqDataSetFromMatrix(countData = mat, colData = colData, design = ~ condition)
+dds
+```
+
+-   **`dds`**: The DESeq2 dataset object
+
+-   **`DESeqDataSetFromMatrix`**: A function from the DESeq2 package is used to create a DESeqDataSet object. This object is an input for the differential expression analysis pipeline in DESeq2.
+
+-   **`countData = mat`**: Specifies count matrix mat, where entries are raw counts of RNA-Seq reads mapped to each genes,
+
+-   **`colData = colData`**: Supplies the metadata 'colData', ensuring that the experimental design is properly linked to the count data.
+
+-   **`design = ~ condition`**: The \~ condition term indicates that the analysis will model the counts as a function of the condition variable in colData.
+
+```{R}
+# Run the DESeq2 Analysis 
+
+dds <- DESeq(dds)
+dds
+```
+
+-   **\`DESeq(dds)**: Performs the core steps of the DESeq2 pipeline, preparing the dataset for differential expression analysis.
+
+```{R}
+# Get results with specified alpha level
+
+results <- results(dds, alpha = 0.05)
+results
+
+# Filter results based on log2-fold change cut-offs
+
+results_filtered <- results[which(abs(results$log2FoldChange) >= 0.585), ]
+results_filtered
+summary(results_filtered)
+```
+
+-   **`results(dds)`**: This extracts the results of the differential expression analysis from the dds object.
+
+-   **`alpha = 0.05`**: Specifies the significance threshold (false discovery rate) for testing. Genes with adjusted p-values less than 0.05 will be considered significantly differentially expressed.
+
+-   **`results[which(), ]`**: Filters the results object to only include genes with an absolute log2 fold change (log2FC) greater than or equal to 0.585.
+
+-   **`abs(results$log2FoldChange)`**: Takes the absolute value of the log2 fold change.
+
+-   **`>= 0.585`**: Filters out genes with a smaller fold change.
+
+```{R}
+# Generate MA plot
+
+plotMA(results_filtered)
+plotMA(results)
+```
+
+NEEDS TO MODIFY!!!!
+
+```{R}
+# Generate Volcano plot
+
+results_df <- as.data.frame(results)
+results_df$significant <- ifelse(results_df$padj < 0.05 & abs(results_df$log2FoldChange) >= 0.585, "Yes", "No")
+
+ggplot(results_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) +
+    geom_point() +
+    theme_minimal() +
+    labs(title = "Volcano Plot", x = "Log2 Fold Change", y = "-Log10 Adjusted P-value")
+
+
+```
+
+-   **`results_df`**: A data frame of the 'results'.
+
+-   **`as.data.frame`**: Converts the results object (which is a DESeqResults object) into a regular data frame (results_df).
+
+-   **`results_df$significant`**: Adds a new column significant to the data frame
+
+-   **`ifelse`**: A vectorised conditional statement. (Similar to 'test' but with yes or no instead of TRUE and FALSE)
+
+-   **`padj\<0.05`**: Select genes with statistically significant adjusted p-values.
+
+-   **\`(results_df\$log2FoldChange) \>= 0.585**: Select genes with a biologically meaningful fold change (≥1.5). Assign "Yes" to genes meeting both criteria; otherwise, assign "No".This adds a new column significant to the data frame, categorising genes as significant or not.cThis will remove values outside the scale range when plotting the graph.
+
+-   **`aes(x = log2FoldChange`**: Aesthetic mapping in ggplot2. It specifies that the x-axis will represent the log2 fold change for each gene.
+
+-   **`y = -log10(padj)`**: Specifies that the y-axis will represent the negative log10 of the adjusted p-value (padj)
+
+-   **`color = significant`**: Maps the color of the points on the plot to the significant column in the results_df data frame.
+
+-   **`geom_point()`**: Adds individual points to the plot, each representing a gene.
+
+-   **`theme_minimal()`**: Applies a minimal theme to the plot.
+
+-   **`labs(title = "Volcano Plot",`**: Sets the plot's title = "Volcano Plot"
+
+-   **`x = "Log2 Fold Change"`**: Labels the x-axis as "Log2 Fold Change".
+
+-   **`y = "-Log10 Adjusted P-value"`**: Labels the y-axis as "-Log10 Adjusted P-value".

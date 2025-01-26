@@ -1,0 +1,15 @@
+Status	data/processed_data/bam_files/ERR2713020.bam	data/processed_data/bam_files/ERR2713021.bam	data/processed_data/bam_files/ERR2713022.bam	data/processed_data/bam_files/ERR2713023.bam	data/processed_data/bam_files/ERR2713024.bam	data/processed_data/bam_files/ERR2713025.bam
+Assigned	12710936	12728305	12946566	12166778	6934961	16542999
+Unassigned_Unmapped	1026097	1000001	1270136	943183	2386345	4146585
+Unassigned_Read_Type	0	0	0	0	0	0
+Unassigned_Singleton	0	0	0	0	0	0
+Unassigned_MappingQuality	0	0	0	0	0	0
+Unassigned_Chimera	0	0	0	0	0	0
+Unassigned_FragmentLength	0	0	0	0	0	0
+Unassigned_Duplicate	0	0	0	0	0	0
+Unassigned_MultiMapping	0	0	0	0	0	0
+Unassigned_Secondary	0	0	0	0	0	0
+Unassigned_NonSplit	0	0	0	0	0	0
+Unassigned_NoFeatures	2516957	2641617	2767252	4619017	3214318	7337739
+Unassigned_Overlapping_Length	0	0	0	0	0	0
+Unassigned_Ambiguity	258178	256287	250992	394144	217888	528329

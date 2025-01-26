@@ -1,0 +1,1112 @@
+---
+title: "Assessing the Reproducibility of AGXX Antimicrobial Coating's Stress Response in Staphylococcus aureus"
+author: "Alicia, Ella, Rahim"
+format:
+  html:
+    code-overflow: wrap
+    code-tools: true
+editor: visual
+execute:
+  eval: true  # Execute code chunks by default
+---
+
+# Bash
+
+## Setting Up the Environment
+
+The first step is to log in to the HPC:
+
+```{bash}
+#| eval: false
+ssh -i ~/.ssh/ed_create yourmail@hpc.create.kcl.ac.uk
+```
+
+Once logged in, start an interactive session on the `msc_appbio` partition:
+
+```{bash}
+#| eval: false
+srun -p msc_appbio --pty /bin/bash
+```
+
+Next, specify the root directory for the project and the name of the Conda environment:
+
+```{bash}
+#| eval: false
+rootDir="/scratch_tmp/grp/msc_appbio/ABCC_group14/"
+envName="test_conda"
+```
+
+### Setting up the directory structure
+
+To ensure the project works correctly, this exact directory structure must be created within the specified root directory.
+
+```{bash}
+#| eval: false
+# Create the project root directory if it does not already exist
+mkdir $rootDir 
+
+# Navigate to the root directory
+cd $rootDir 
+
+# Create the required directory structure
+mkdir -p data/processed_data/sam_files data/processed_data/bam_files data/processed_data/counts_files data/processed_data/DESeq2_tables data/raw_data data/reference_genome/bowtie2_index data/metadata results/fastqc_results results/tables results/figures results/tables
+```
+
+### Creating and activating the Conda environment
+
+To ensure the correct software versions and dependencies are installed while avoiding conflicts, an isolated Conda environment is created.
+
+```{bash}
+#| eval: false
+# Add Anaconda to the PATH
+export PATH="/opt/anaconda3/bin:$PATH"
+
+# Verify Conda installation
+conda --version # Output: conda 22.9.0
+
+# Add necessary Conda channels
+conda config --add channels defaults
+conda config --add channels bioconda
+conda config --add channels conda-forge
+
+# Create a new Conda environment ('-y' automatically confirms prompts)
+conda create --name $envName -y
+
+# Activate the new environment
+conda activate $envName 
+
+# Install specific versions of bioinformatics packages
+conda install -y bowtie2 samtools fastqc subread r
+
+# Verify installation
+bowtie2 --version      # Expected Output: 2.5.4
+samtools --version     # Expected Output: 1.21
+fastqc --version       # Expected Output: v0.12.1
+featureCounts -v       # Expected Output: v2.0.6 (FeatureCounts is part of Subread)
+r --version       # Expected Ouptut: v4.3.0
+```
+
+## Data Preparation
+
+### Downloading, unzipping, and organizing
+
+Much of the data and metadata required for this project is hosted on external databases and repositories. Instead of manually downloading and storing these files in the GitHub repository—which would be redundant and inefficient—they can be retrieved directly from the web using the `wget` tool.
+
+#### Reference genome (FASTA, GTF and Annotation Table)
+
+The genome assembly and annotation for *Staphylococcus aureus* USA300_TCH1516 (accession number CP000730) were obtained from [NCBI GenBank](https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_000017085.1/).
+
+-   FASTA file: Used to align the sequencing reads to the reference genome.
+
+-   GTF file: Used to assign aligned reads to specific genes and generate count data.
+
+It is important to use the GenBank genome assembly because it matches the one used in our original paper. Locus tags are unique identifiers for genes or features within a specific genome assembly. To meaningfully compare our results with theirs, we need the same locus tags, which requires using the same reference genome assembly.
+
+```{bash}
+#| eval: false
+# Download the genome assembly (FASTA file)
+wget -N https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/017/085/GCA_000017085.1_ASM1708v1/GCA_000017085.1_ASM1708v1_genomic.fna.gz -O data/reference_genome/S_aureus_CP000730.fna.gz
+
+# Download the genome annotation (GTF file)
+wget -N https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/017/085/GCA_000017085.1_ASM1708v1/GCA_000017085.1_ASM1708v1_genomic.gtf.gz -O data/reference_genome/S_aureus_CP000730.gtf.gz
+
+# Unzip the downloaded files (-f overwrites existing unzipped files)
+gunzip -f data/reference_genome/*.gz
+```
+
+#### Experimental metadata
+
+The SDRF (Sample and Data Relationship Format) file, a tab-delimited metadata file that maps samples to their data files, was downloaded from the [ArrayExpress functional genomics data collection](https://www.ebi.ac.uk/biostudies/arrayexpress/studies/E-MTAB-7074?query=E-MTAB-7074.sdrf.txt). This file is needed for our project because:
+
+-   It provides links to raw sequencing data for download.
+
+-   It identifies control and treatment samples for downstream analysis.
+
+*This file no longer seems to exist at the online location (or it may be corrupted) as it cannot be downloaded manually or using `wget`. Fortunately, we have a local copy that we are using for our project.*
+
+```{bash}
+#| eval: false
+# Download the sample description file (SDRF) from ArrayExpress
+wget https://www.ebi.ac.uk/arrayexpress/files/E-MTAB-7074/E-MTAB-7074.sdrf.txt -O data/metadata/E-MTAB-7074.sdrf.txt
+```
+
+Next, the supplementary table from the original study was downloaded to map locus tags to gene symbols, operons, and regulons, to extract meaning from the RNA expression profiles. Gene annotation could also be done with the GenBank feature table, but since we are doing it from the supplementary table from the study for regulons and operons too, it was just easier to use their mappigns for gene symbols as well).
+
+```{bash}
+#| eval: false
+# Download the supplementary material tables
+wget https://www.frontiersin.org/api/v3/articles/429297/file/Table_1.XLSX/429297_supplementary-materials_tables_1_xlsx/1 -O data/metadata/supplementary_material1.XLSX
+
+wget https://www.frontiersin.org/api/v3/articles/429297/file/Table_2.XLSX/429297_supplementary-materials_tables_2_xlsx/1 -O data/metadata/supplementary_material2.XLSX
+```
+
+#### Raw data (FASTQ)
+
+The FASTQ files containing the raw sequencing data for our samples are downloaded from the European Nucleotide Archive (ENA), where ArrayExpress brokers raw sequence reads. These files can be retrieved using the links provided in the SDRF file. Since our study uses paired-end sequencing, each sample has two FASTQ files: one for forward reads and one for reverse reads.
+
+The process of extracting each link from the SDRF file and downloading the corresponding FASTQ files is automated using a loop.
+
+```{bash}
+#| eval: false
+# Extract each link and download it immediately into the raw_data directory
+grep -o 'ftp://[^ ]*\.fastq\.gz' data/metadata/E-MTAB-7074.sdrf.txt | while read -r url; do
+  wget -N -P data/raw_data "$url"
+done
+
+# Unzip all downloaded FASTQ files
+gunzip -f data/raw_data/*.fastq.gz
+```
+
+### Building the Reference Index
+
+To align sequencing reads to their corresponding locations in the genome with Bowtie2, a pre-built index of the reference genome is required. This index, created using the `bowtie2-build` command, enables Bowtie2 to quickly locate potential match locations during alignment.
+
+```{bash}
+#| eval: false
+# Run the bowtie2-build command to build the reference genome index 
+bowtie2-build -f --threads 4 data/reference_genome/S_aureus_CP000730.fna "$rootDir/data/reference_genome/bowtie2_index/S_aureus_CP000730"
+# bowtie2-inspect "$rootDir/data/reference_genome/bowtie2_index/S_aureus_CP000730"
+```
+
+## Quality Control using FastQC
+
+FastQC analyzes each file and generates a report with quality metrics, including per-base sequence quality, GC content, sequence length distribution, and overrepresented sequences. These metrics help identify issues in the sequencing data that may need to be addressed before further analysis. Documentation on the FastQC Project can be found [here](https://www.bioinformatics.babraham.ac.uk/projects/fastqc/Help/).
+
+```{bash}
+#| eval: false
+fastqc -o results/fastqc_results -t 4 data/raw_data/*.fastq
+```
+
+## Alignment with Bowtie2
+
+Once the Bowtie2 index for the reference genome is created, raw sequencing reads can be aligned to the genome using Bowtie2, producing a SAM file as the output. For paired-end reads, Bowtie2 uses orientation and insert size constraints to align forward and reverse reads, improving alignment confidence. Since this process is performed for each sample, it can be automated using a loop. Next, the SAM file is converted to a BAM file in binary format for further processing, as performed in the reference study.
+
+```{bash}
+#| eval: false
+# Loop through all the first paired-end FASTQ files in the raw_data directory
+for fastq_file in data/raw_data/*_1.fastq; do
+  # Extract the base name (e.g., ERR2713020 from ERR2713020_1.fastq)
+  base_name=$(basename "$fastq_file" _1.fastq)
+  echo "Reading: ${base_name}"
+
+  # Align paired-end reads using Bowtie2 (-x gives the location and prefix of the reference genome bowtie2 index, -1 and -2 are the paths to the raw forward and reverse sequencing reads, -S specifies the output should be SAM, and -p allocates 4 threads to make the command faster) 
+  bowtie2 -x data/reference_genome/bowtie2_index/S_aureus_CP000730 -1 data/raw_data/"${base_name}_1.fastq" -2 data/raw_data/"${base_name}_2.fastq" -S data/processed_data/sam_files/"${base_name}.sam" -p 4
+  echo "Bowtie2 done"
+
+  # Convert from SAM to BAM using the samtools view command (-S specifies the input is .sam, -b specifies the output should be BAM, and -o specifies the output name and location)
+  samtools view -S -b data/processed_data/sam_files/"${base_name}.sam" -o data/processed_data/bam_files/"${base_name}.bam"
+  echo "SAMtools done"
+done
+
+```
+
+## Generating Count Data
+
+The number of reads aligned to each gene can be calculated using the `featureCounts` function from Subread. SAM files for all samples can be processed together to generate a count table of genes for each sample. Because we are working with RNA sequencing data, we are inherently interested by coding DNA sequences only (CDS), which we need to specify in the command)
+
+```{bash}
+#| eval: false
+
+# generate a list of bam files because that is what the feature counts command expects if processing multiple files at once 
+bam_files=$(ls data/processed_data/bam_files/*.bam | tr '\n' ' ')
+
+# -t CDS specifies we are only interested in assigning reads to coding DNA sequences , -p specifies we are dealing with paired end seuqencing reads, -g assigns reads to the gene_id column of the gtf file, -a specifies the path to the genome annotation file -a is the path to the genome anotation and -o is the path and name of the output table 
+featureCounts -t CDS -p -g gene_id -F GTF \
+  -a data/reference_genome/S_aureus_CP000730.gtf \
+  -o data/processed_data/counts_files/all_samples_counts.txt $bam_files
+```
+
+# R
+
+Once the count table is generated, differential expression analysis and data visualization can be performed in R to interpret and explore the results.
+
+## Setting Up the Environment
+
+### Loading and Installing Packages
+
+```{r, message=FALSE}
+# Clear the environment to start with a clean workspace
+rm(list = ls())
+
+# Optional: Install required CRAN and Bioconductor packages
+# Uncomment and run the lines below if packages are not installed
+
+# install.packages(c("BiocManager", "readr", "readxl", "dplyr", "tibble", "ggplot2", "ggrepel", "pheatmap", "tidyr", "RColorBrewer"))
+# if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+
+# BiocManager::install("DESeq2")
+# Load required libraries
+library(readr)       # Read/write delimited files (.txt, .tsv, etc.)
+library(readxl)      # Read Excel files (.xlsx)
+library(tidyr)       # Data tidying and reshaping
+library(dplyr)       # Data manipulation (e.g., filter, mutate, select)
+library(tibble)      # Enhanced data frames (tibbles)
+library(ggplot2)     # MA & volcano plots
+library(ggrepel)     # Non-overlapping text labels for MA & volcano plots
+library(pheatmap)    # Generate heatmaps
+library(DESeq2)      # Differential expression analysis
+library(RColorBrewer)
+library(patchwork)
+
+```
+
+### Defining File Paths
+
+The user must define the root directory in R for the code to work properly.
+
+```{r}
+# Base directory for the project
+rootDir <- "~/Desktop/bioinf/abcc_project/"
+```
+
+Once the `rootDir` is correctly set, and the directory structure follows the expected format, the following paths, dynamically defined based on `rootDir`, will point to the necessary input files without requiring manual edits.
+
+```{r}
+# Define file paths for input data
+counts_path <- paste0(rootDir, "data/processed_data/counts_files/all_samples_counts.txt")   # Path to counts data
+supplementary_material1_path <- paste0(rootDir, "data/metadata/supplementary_material1.XLSX")                               # Path to supplementary table 1
+supplementary_material2_path <- paste0(rootDir, "data/metadata/supplementary_material2.XLSX")                               # Path to supplementary table 1
+sdrf_path <- paste0(rootDir, "data/metadata/E-MTAB-7074.sdrf.txt")                         # Path to SDRF metadata file
+```
+
+### Loading the Data
+
+The tables corresponding to these paths are loaded into R. The headings of these tables are messy and inconsistent, so they are renamed improve clarity, maintain consistency, and simplify downstream analysis.
+
+#### Counts Table
+
+The counts table is generated from the raw data using Subread's `featureCounts`. The rows correspond to genes, and the columns correspond to samples. Each entry represents the number of times a gene was aligned in a specific sample.
+
+```{r}
+# Load the counts table, excluding the first line (featureCounts command used to generate the counts)
+counts <- read_table(
+  file = counts_path,
+  skip = 1
+)
+# Standardize the column names of the counts table 
+colnames(counts) <- c(
+  "locus_tag", "accession", "begin", "end", "orientation", "length",
+  "ERR2713020", "ERR2713021", "ERR2713022", "ERR2713023", "ERR2713024", "ERR2713025"
+)
+head(counts)
+```
+
+#### Supplementary Table
+
+The original paper includes a supplementary table that provides detailed information about each CDS in the counts table. This information includes the locus tag from the GenBank assembly, specific to the *Staphylococcus aureus* subsp. *aureus* USA300 strain; the corresponding tag for the *Staphylococcus aureus* subsp. *aureus* COL strain; the gene symbol (replaced by the USA300 locus tag if missing); the corresponding operons and regulons; the gene function; and the DESeq2 metrics.
+
+```{r}
+# Load the S2 Excel table excluding the first line (table title)
+supplementary_material2 <- read_excel( 
+  supplementary_material2_path,
+  skip = 1
+)
+# Standardize the column names of supplementary_material2 
+colnames(supplementary_material2) <- c(
+  "fun_cat", "regulon", "operon", "sacol_numbers",
+  "usa300_numbers", "gene_symbol", "log2_fold_change", "fold_change", "function"
+)
+head(supplementary_material2)
+```
+
+While the paper specifies classifying genes into operons and regulons using the RegPrecise database (<http://regprecise.lbl.gov/RegPrecise/index.jsp>) and previous studies (Mäder et al., 2016), we relied on their existing mappings (provided in Table S1) to evaluate whether our RNA-seq results aligned with theirs. An additional step could use the RegPrecise database and literature review to validate the accuracy and reproducibility of their mappings, but this is beyond the project's scope.
+
+```{r}
+# Load the S1 Excel table excluding the first line (table title)
+supplementary_material1 <- read_excel( 
+  supplementary_material1_path,
+  skip = 1
+)
+
+colnames(supplementary_material1) <- c(
+  "usa300_numbers", "col_numbers", "gene_symbol", "operon",
+  "regulon", "function", "base_mean", "a_value", "m_value", "fold_change", "standard_error", "wald_statistic", "p_value", "adjusted_p_value"
+)
+
+head(supplementary_material1)
+```
+
+#### SDRF Metadata
+
+The SDRF file contains metadata about the experiment, including the experimental conditions needed for differential expression analysis.
+
+```{r}
+# Load the SDRF table; use read.delim because it handles duplicated column names effectively.
+sdrf <- read.delim(
+  file = sdrf_path,    
+)
+# Standardize the column names of the SDRF table 
+colnames(sdrf) <- c(
+  "source_name", "ena_sample", "biosd_sample", "organism", "strain",
+  "growth_condition", "genotype", "material_type", "protocol_ref_1",
+  "protocol_ref_2", "protocol_ref_3", "protocol_ref_4", "protocol_ref_5",
+  "extract_name", "library_layout", "library_selection", "library_source",
+  "library_strand", "library_strategy", "nominal_length", "nominal_sdev",
+  "orientation", "protocol_ref_6", "performer", "assay_name",
+  "technology_type", "ena_experiment", "scan_name", "submitted_file_name",
+  "ena_run", "fastq_uri", "spot_length", "read_index_1_base_coord",
+  "compound", "dose", "dose_unit"
+)
+head(sdrf)
+```
+
+## Differential Expression Analysis
+
+Differential expression analysis identifies genes with statistically significant differences in expression levels between the control and AGXX treatment, revealing which genes are upregulated or repressed.
+
+This analysis is conducted in R using the DESeq2 package, which requires:
+
+-   `countData`: A matrix or data frame of raw transcript counts.
+
+-   `colData`: A data frame of sample metadata, including experimental conditions.
+
+### Preparing Input Data
+
+#### `countData`: Raw Counts Table
+
+`countData` contains raw transcript counts, with rows as genes and columns as samples. Additional columns from the `featureCounts` output (e.g., `begin`, `end`, `strand`, `length`) are excluded because they are not needed for analysis.
+
+```{r}
+# Create countData from the counts table
+countData <- counts %>%
+  select(locus_tag, ERR2713020:ERR2713025) %>%  # Keep only the locus tags and sample columns
+  column_to_rownames(var = "locus_tag")         # Use locus_tag as row names and remove it as a column
+head(countData)
+```
+
+#### `colData`: Sample Metadata
+
+The `colData` object contains metadata about the samples, including experimental conditions. The SDRF file includes two rows per sample due to forward and reverse runs, so we filter it to retain one row per sample based on a unique identifier (`ena_sample`). In this case, we are only interested in the `ena_run` and `compound` variables, which define the sample name and whether it was a control or treatment, respectively. However, it is good practice to include all metadata in the `colData` object.
+
+```{r}
+# Extract unique rows for each sample based on 'ena_sample'
+colData <- sdrf[!duplicated(sdrf$ena_sample), ]
+head(colData)
+```
+
+In the metadata, the AGXX condition appears before the control, making it the default reference level. However, it is essential to set the control condition (`"none"`) as the reference level to serve as the baseline for comparing expression changes in response to AGXX treatment. This ensures meaningful and biologically relevant results.
+
+```{r}
+# Relevel the 'compound' factor to set "none" (control) as the reference level
+colData$compound <- relevel(factor(colData$compound), ref = "none")
+
+# Confirm the updated levels of the 'compound' factor
+levels(colData$compound)  # Ensure "none" is now the reference level
+```
+
+#### Creating the DESeq2 Dataset
+
+Once the data is prepared, a DESeq2 dataset is created using the `DESeqDataSetFromMatrix` function. The experimental design is specified using `design = ~ compound`, focusing the analysis on differences in the `compound` variable ("none" vs. "AgXX373").
+
+```{r}
+# Create a DESeqDataSet object
+dds <- DESeqDataSetFromMatrix(countData = countData, colData = colData, design = ~ compound)
+```
+
+### Running the Differential Expression Analysis Using DESeq2
+
+Differential expression analysis is performed using the `DESeq()` function, which processes the DESeq2 dataset to identify differentially expressed genes.
+
+```{r}
+# Perform differential expression analysis
+dds <- DESeq(dds)
+```
+
+After running `DESeq()`, the `results()` function extracts key metrics:
+
+-   `baseMean`: Average normalized read count across all samples.
+
+-   `log2FoldChange`: Log2-transformed fold change between conditions (e.g., AGXX treatment vs. control).
+
+-   `lfcSE`: Standard error of the log2-fold change.
+
+-   `stat`: Wald test statistic for hypothesis testing.
+
+-   `pvalue`: Raw p-value for differential expression.
+
+-   `padj`: Adjusted p-value (FDR corrected) to control for multiple testing.
+
+The significance level is specified using the `alpha` parameter. Our paper used an adjusted *p*-value cut-off of *P* ≤ 0.05, so we set alpha to 0.05 too (default: 0.1).
+
+```{r}
+# Extract the results of differential expression analysis with a significance threshold of alpha = 0.05
+res <- results(dds, alpha = 0.05)
+```
+
+The `summary()` function from the DESeq2 package provides an overview of the results, such as the number of differentially expressed genes, their direction (upregulated or repressed), and any outliers or low-count genes excluded.
+
+```{r}
+# Summarize the results
+summary(res)
+```
+
+In our case, the summary shows that 2,683 genes with nonzero read counts were analyzed, with 1,028 (38%) significantly upregulated and 1,007 (38%) significantly repressed (adjusted p-value \< 0.05). No outliers or low-count genes were excluded.
+
+The `plotMA()` function from the DESeq2 package visualizes log2-fold changes versus mean expression levels, highlighting significantly differentially expressed genes. This function is intended for quick data visualization rather than generating publication-ready plots. For this reason, we also created an MA plot using `ggplot2`.
+
+```{r}
+# Generate an MA plot to visualize log2-fold changes vs. mean expression
+plotMA(res)
+```
+
+```{r}
+# Save the results to a CSV file for further analysis or reporting
+write.csv(res, file = paste0(rootDir, "/results/tables/deseq2_results.csv"), row.names = TRUE)
+```
+
+### Cleaning the Results
+
+#### Load and Reformat the Results
+
+We can clean and reformat the DESeq2 results to match the format of the S2 table from our study, simplifying comparison and downstream analysis.
+
+```{r}
+# Convert results to a tibble and include row names as a "locus_tag" column
+res_df <- as_tibble(res, rownames = "locus_tag")
+
+# Rename columns for clarity
+colnames(res_df) <- c(
+  "locus_tag", "base_mean", "m_value", "standard_error", "wald_statistic", 
+  "p_value", "adjusted_p_value"
+)
+
+# Remove and note genes where no expression was detected to avoid NA later on 
+res_df <- res_df[!res_df$base_mean == 0, ]
+```
+
+#### Extrapolate the Results
+
+Metrics like fold change and a-value, calculated in the original paper, can be inferred directly from the DESeq2 results.
+
+```{r}
+# Add additional metrics
+res_df$fold_change <- 2^res_df$m_value               # Convert log2 fold change to fold change
+res_df$a_value <- log2(res_df$base_mean)         # Log2 transform base mean 
+```
+
+## Interpreting and Filtering the Results
+
+### Mapping Locus Tags to Genes, Operons and Regulons
+
+To assign meaning to the data, we need to map the locus tags to their respective genes, operons, and regulons. These mappings are available in Table 1. This step helps ensure accurate labeling of our figures and facilitates meaningful comparisons between our findings and the original paper.
+
+```{r}
+res_df <- res_df %>%
+  left_join(
+    supplementary_material2[, c("usa300_numbers", "gene_symbol", "operon", "regulon")],  # Subset relevant columns
+    by = c("locus_tag" = "usa300_numbers") # Specify the column to join by
+  )
+
+# Replace "-" regulons with NA 
+res_df$regulon[res_df$regulon == "-"] <- NA
+
+head(res_df)
+```
+
+#### Expression Level
+
+The paper specifies that "*for significant expression changes, the M-value cut-off (log2-fold change AGXX^®^/control) of ≥0.6 and ≤ −0.6 (fold-change of ± 1.5, P ≤ 0.05) was chosen since the majority of most strongly induced regulons fall in this range.*" They also identified upregulated genes with fold changes greater than 10-fold.
+
+We can use these numbers to classify our genes into different categories.
+
+```{r}
+# Add a grouping column for differential expression categories
+res_df$expression <- with(res_df, ifelse(
+  adjusted_p_value < 0.05 & fold_change > 10, "Strongly upregulated", 
+  ifelse (adjusted_p_value < 0.05 & fold_change < 0.1, "Strongly repressed", 
+          ifelse (adjusted_p_value < 0.05 & m_value > 0.585, "Significantly upregulated", 
+          ifelse(
+    adjusted_p_value < 0.05 & m_value < -0.585, "Significantly repressed",  
+    "No fold-changes"
+  )
+  )
+  )
+  )
+  )
+unique(res_df$expression)
+```
+
+Our paper found that "*in total, 925 transcripts were significantly \>1.5-fold upregulated and 896 were \<-1.5-fold repressed in the transcriptome of S. aureus under AGXX^®^ stress*". We can measure this in our data using the `expression_groups` column:
+
+```{r}
+# Count the number of upregulated transcripts
+up_regulated_count <- sum(res_df$expression %in% c("Significantly upregulated", "Strongly upregulated"), na.rm = TRUE)
+up_regulated_count
+
+# Count the number of repressed transcripts
+repressed_count <- sum(res_df$expression %in% c("Significantly repressed", "Strongly repressed"), na.rm = TRUE)
+repressed_count
+```
+
+In our data, in total, 929 transcripts were significantly \>1.5-fold upregulated and 896 were \<-1.5-fold repressed in the transcriptome of S. aureus under AGXX^®^ stress.
+
+This suggests a difference of 5 transcripts compared to the original study; it would be interesting to investigate which ones.
+
+The paper further states that "*among the upregulated genes are 149 with fold-changes of \>10-fold that could be classified into the PerR, HypR, QsrR, MhqR, CtsR, HrcA, CidR, CymR, CstR, CsoR, Fur, Zur, SigB, and GraRS regulons*". And further state that "*the PerR, TetR, HypR, QsrR, MhqR, CtsR, HrcA, CidR, CymR, Fur, CstR, CsoR, and Zur regulons are most strongly upregulated under AGXX^®^ stress*".
+
+We can count the strongly upregulated genes, and identify their corresponding regulons to compare our data to the paper's findings.
+
+```{r}
+# Count and identify strongly upregulated regulons in one step
+upregulated_genes <- res_df[res_df$expression == "Strongly upregulated", ]
+nrow(upregulated_genes)  # 
+upregulated_regulons <- unique(upregulated_genes$regulon[!is.na(upregulated_genes$regulon)])  # Extract unique, non-NA regulons
+upregulated_regulons
+```
+
+In our data, we found that 147 upregulated genes with fold changes greater than 10-fold could be classified into the following regulons: AgrA, CcpA, CidR, CsoR, CstR, CymR, Fur, FruR, GraRS, HrcA, HypR, LexA, MhqR, MgrA, PerR, QsrR, SaeRS, SigB, TetR, and Zur.
+
+This suggests a difference of 2 strongly upregulated genes. Additionally, we identified 7 more strongly upregulated regulons: AgrA, CcpA, CsoR, FruR, LexA, MgrA, and SaeRS. **It would be interesting to explore how these differences arise and whether they are due to inconsistent reporting (i.e., the author didn't mention all the upregulated regulons) or actual differences in the data.**
+
+For the sake of consistency, although the paper did not perform this step, we can also identify the regulons that are strongly repressed.
+
+```{r}
+# Count and identify strongly repressed regulons 
+repressed_genes <- res_df[res_df$expression == "Strongly repressed", ]
+nrow(repressed_genes)  # 
+repressed_regulons <- unique(repressed_genes$regulon[!is.na(repressed_genes$regulon)])  # Extract unique, non-NA regulons
+repressed_regulons
+```
+
+Because we expect regulons to be either repressed or upregulated, we can check for overlap between the repressed regulons and upregulated regulons (this should be none).
+
+```{r}
+overlap_regulons <- intersect(upregulated_regulons, repressed_regulons)
+overlap_regulons
+```
+
+Because the GraRS, SigB, SaeRS, and MgrA regulons have both strongly upregulated and strongly repressed genes, further investigation is warranted, as this outcome is unexpected.
+
+## Visualization
+
+### Add Labels
+
+For their labels, the paper used the operon. If the operon name matched a COL strain locus tag, it was replaced with the gene symbol if available; otherwise, the USA300 locus tag was used. For USA300 locus tags, identifiers in the format "USA300HOU_XXXX" were simplified to retain only the numeric portion (XXXX). Additionally, some operon names were systematically shortened for improved visualization.
+
+***Since only a few entries required these adjustments, the changes were made manually.***
+
+```{r}
+# Assign labels 
+res_df$label <- ifelse(
+  grepl("-", res_df$operon, perl = TRUE) | grepl("(?i)sacol", res_df$operon, perl = TRUE),  # Match missing or SACOL operons
+  gsub("USA300HOU_", "", res_df$gene_symbol),  # Replace with gene_symbol
+  res_df$operon  # Use operon if exists in correct format 
+  )
+# Manually shorten specific labels
+res_df$label[res_df$label == "ctsR mcsA mcsB clpC"] <- "mcsAB-clpC-ctsR"
+res_df$label[res_df$label == "lrgA lrgB"] <- "lrgAB"
+res_df$label[res_df$label == "mhqR mhqD mhqE"] <- "mhqRDE"
+res_df$label[res_df$label == "cysJ-cysG"] <- "cysJG"
+res_df$label[res_df$label == "groEL-groES"] <- "groEL-ES"
+
+head(unique(res_df$label))
+sum(res_df$label != "" & !is.na(res_df$label))
+```
+
+The authors of the original paper assigned the same label to multiple data points. However, we were unable to replicate this approach. To avoid cluttering our plot, we assigned each label only once, prioritizing the data point with the lowest adjusted p-value, which indicates the highest significance.
+
+```{r}
+
+# Keep the label only for the row with the lowest adjusted_p_value within each group
+res_df <- res_df %>%
+  group_by(label) %>%  # Group the data by 'label'
+  mutate(
+    label = ifelse(
+      adjusted_p_value == min(adjusted_p_value, na.rm = TRUE) & row_number() == 1,  # Keep only the first occurrence of the minimum
+      label,  # Retain the label if it's the minimum
+      ""  # Otherwise, set it to an empty string
+    )
+  ) %>%
+  ungroup()  # Remove
+```
+
+### Interpreting and Filtering the Results
+
+The paper categorizes the genes based on specific criteria. We can assign genes to different categories by adding a column to the table too.
+
+#### Expression Level
+
+The paper specifies that "*for significant expression changes, the M-value cut-off (log2-fold change AGXX^®^/control) of ≥0.6 and ≤ −0.6 (fold-change of ± 1.5, P ≤ 0.05) was chosen since the majority of most strongly induced regulons fall in this range.*" They also identified upregulated genes with fold changes greater than 10-fold.
+
+We can use these numbers to classify our genes into four categories: significantly upregulated, significantly repressed, and no fold change.
+
+```{r}
+# Add a grouping column for differential expression categories
+res_df$expression <- with(res_df, ifelse(
+  adjusted_p_value < 0.05 & fold_change > 10, "Strongly upregulated", 
+  ifelse (adjusted_p_value < 0.05 & fold_change < 0.1, "Strongly repressed", 
+          ifelse (adjusted_p_value < 0.05 & m_value > 0.585, "Significantly upregulated", 
+          ifelse(
+    adjusted_p_value < 0.05 & m_value < -0.585, "Significantly repressed",  
+    "No fold-changes"
+  )
+  )
+  )
+  )
+  )
+unique(res_df$expression)
+```
+
+The paper also identified upregulated genes with fold changes greater than 10-fold.
+
+## Interpretation
+
+Our paper found that "*in total, 925 transcripts were significantly \>1.5-fold upregulated and 896 were \<-1.5-fold repressed in the transcriptome of S. aureus under AGXX^®^ stress*". We can measure this in our data using the `expression_groups` column:
+
+```{r}
+# Count the number of upregulated transcripts
+up_regulated_count <- sum(res_df$expression %in% c("Significantly upregulated", "Strongly upregulated"), na.rm = TRUE)
+up_regulated_count
+
+# Count the number of repressed transcripts
+repressed_count <- sum(res_df$expression %in% c("Significantly repressed", "Strongly repressed"), na.rm = TRUE)
+repressed_count
+```
+
+In our data, in total, 929 transcripts were significantly \>1.5-fold upregulated and 896 were \<-1.5-fold repressed in the transcriptome of S. aureus under AGXX^®^ stress.
+
+This suggests a difference of 5 transcripts compared to the original study; it would be interesting to investigate which ones.
+
+The paper further states that "*among the upregulated genes are 149 with fold-changes of \>10-fold that could be classified into the PerR, HypR, QsrR, MhqR, CtsR, HrcA, CidR, CymR, CstR, CsoR, Fur, Zur, SigB, and GraRS regulons*". And further state that "*the PerR, TetR, HypR, QsrR, MhqR, CtsR, HrcA, CidR, CymR, Fur, CstR, CsoR, and Zur regulons are most strongly upregulated under AGXX^®^ stress*".
+
+We can count these using the `strongly_upregulated` column, and extract the corresponding regulons from the regulons column.
+
+```{r}
+# Count and identify strongly upregulated regulons in one step
+upregulated_genes <- res_df[res_df$expression == "Strongly upregulated", ]
+nrow(upregulated_genes)  # 
+upregulated_regulons <- unique(upregulated_genes$regulon[!is.na(upregulated_genes$regulon)])  # Extract unique, non-NA regulons
+upregulated_regulons
+```
+
+In our data, we found that 147 upregulated genes with fold changes greater than 10-fold could be classified into the following regulons: AgrA, CcpA, CidR, CsoR, CstR, CymR, Fur, FruR, GraRS, HrcA, HypR, LexA, MhqR, MgrA, PerR, QsrR, SaeRS, SigB, TetR, and Zur.
+
+This suggests a difference of 2 strongly upregulated genes. Additionally, we identified 7 more strongly upregulated regulons: AgrA, CcpA, CsoR, FruR, LexA, MgrA, and SaeRS. It would be interesting to explore how these differences arise and whether they are due to inconsistent reporting (i.e., the author didn't mention all the upregulated regulons) or actual differences in the data.
+
+```{r}
+# Count and identify strongly repressed regulons 
+repressed_genes <- res_df[res_df$expression == "Strongly repressed", ]
+nrow(repressed_genes)  # 
+repressed_regulons <- unique(repressed_genes$regulon[!is.na(repressed_genes$regulon)])  # Extract unique, non-NA regulons
+repressed_regulons
+```
+
+## Visualization
+
+### M/A Plot
+
+An M/A plot can be used to visualize the data, where the A-value represented the log2 base mean (overall expression level) and the M-value represented the log2-fold change (expression changes between conditions).
+
+#### Replicate the Paper's M/A Plot
+
+The most strongly induced regulons in the AGXX® transcriptome (TetR, HypR, MhqR, CidR, QsrR, CtsR, HrcA, CymR, PerR, Fur, CsoR, CstR, Zur) were specifically colored and labelled.
+
+```{r}
+labelled_regulons <- c("TetR", "HypR", "MhqR", "CidR", "QsrR", "CtsR", "HrcA", "CymR", "PerR", "Fur", "CsoR", "CstR", "Zur")
+```
+
+To replicate the coloring and labeling from the original paper, we can add a `color_paper` column to the `res_df` table, based on expression groups and the presence of the specific regulons.
+
+```{r}
+# Create a 'color_paper' column
+res_df$color_paper <- with(
+  res_df,
+  ifelse(
+    regulon %in% labelled_regulons & expression %in% c("Significantly upregulated", "Strongly upregulated"),
+    regulon,  # Use regulon value if condition is met
+    expression  # Otherwise, use expression value
+  )
+)
+
+# Check unique values in the 'color_paper' column
+unique(res_df$color_paper)
+
+```
+
+```{r}
+# Generate the M/A plot
+ma_plot_personal <- ggplot() +
+  # Plot background points (smaller, non-labelled)
+  geom_point(
+    data = res_df[!(res_df$regulon %in% labelled_regulons & 
+                    res_df$expression %in% c("Significantly upregulated", "Strongly upregulated")), ],
+    aes(x = a_value, y = m_value, color = color_paper),  
+    size = 1.5,  # Small points for background
+  ) +
+  # Plot strongly upregulated operons (larger, coloured & labelled)
+  geom_point(
+    data = res_df[res_df$regulon %in% labelled_regulons & 
+                  res_df$expression %in% c("Significantly upregulated", "Strongly upregulated"), ],
+    aes(x = a_value, y = m_value, color = color_paper),  # Map color to regulon category
+    size = 1.5,  
+  ) +
+  # Label the points based on their operon
+  geom_text_repel(
+    data = res_df[res_df$regulon %in% labelled_regulons & 
+                  res_df$expression %in% c("Significantly upregulated", "Strongly upregulated"), ],
+    aes(x = a_value, y = m_value, label = label),  
+    color = "black",  
+    size = 2, 
+    max.overlaps = Inf,  # Allow all existing labels 
+    segment.size = 0.15,  
+    min.segment.length = 0.1,  
+    box.padding = 0.4  
+  ) +
+  # Colour the points based on their expression, or regulon for strongly upregulated genes
+  scale_color_manual(
+    values = c(
+      "No fold-changes" = "#dadada",
+      "Significantly upregulated" = "#fefc05",
+      "Strongly upregulated" = "#fefc05",
+      "Significantly repressed" = "#7f7f7f", 
+      "Strongly repressed" = "#7f7f7f", 
+      "TetR" = "#4e8436", "HypR" = "#be0000", "MhqR" = "#fd0606", "CidR" = "#8c4712", "QsrR" = "#ff8b27", "CtsR" = "#a622f2", "HrcA" = "#db6dd4", "CymR" = "#ddc9ff", "PerR" = "#1d90ff", "Fur" = "#04cdd1", "CsoR" = "#95f4ff", "CstR" = "#cbf3ff", "Zur" = "#09fc07"),  # Custom colors for specific regulons
+    breaks = c("TetR", "HypR", "MhqR", "CidR", "QsrR", "CtsR", "HrcA", "CymR", 
+               "PerR", "Fur", "CsoR", "CstR", "Zur"),  # Include only labelled regulons in the legend
+    guide = guide_legend(title = "Regulons")  # Legend title
+  ) +
+  # Add plot titles and axis labels
+  labs(
+    title = "M/A Plot Highlighting Expression Levels and Regulons in the AGXX® Transcriptome",
+    x = "A-value (log2 base mean)",  
+    y = "M-value (log2-fold change)",  
+  ) +
+  # Customize X- and Y-axis scales (limits and tick marks)
+  scale_x_continuous(
+    limits = c(0, 20),  
+    breaks = seq(0, 20, by = 2) 
+  ) +
+  scale_y_continuous(
+    limits = c(-6, 10),  
+    breaks = seq(-6, 10, by = 2)  
+  ) +
+  theme_minimal()
+
+# Save the plot as a JPEG file
+jpeg(filename = paste0(rootDir, "results/figures/ma_plot_paper.jpg"), width = 20, height = 16, units = "cm", res = 700)
+
+# Render the plot
+ma_plot_personal
+
+# Close the graphics device to save the file
+dev.off()
+
+# Display the plot in the R environment
+ma_plot_personal
+```
+
+#### Make our Own M/A Plot
+
+For our own graphs, we want to be more inclusive, including all strongly upregulated and strongly repressed regulons.
+
+```{r}
+# Create a 'color_paper' column
+res_df$color_personal <- with(res_df, ifelse(regulon %in% c(upregulated_regulons, repressed_regulons), regulon, expression))
+# Print the paper legend with unique color labels as a comma-separated list
+cat("personal Legend: ", paste(unique(res_df$color_personal), collapse = ", "), "\n")
+```
+
+### Volcano Plot
+
+```{r}
+# Identify indices of significant genes
+indices <- which((res_df$m_value > 3.2 | res_df$m_value < -3.2) & res_df$p_value < 0.05)
+
+# Get unique regulons associated with the genes at indices
+unique_regulons <- unique(na.omit(res_df$regulon[indices]))
+
+# Assign colors to the `color` column based on the conditions
+res_df$color_personal <- with(res_df, ifelse(
+  regulon %in% unique_regulons,  # Check if regulon is in labelled_regulons
+  regulon,                        # Assign regulon color if in labelled_regulons
+  expression                      # Otherwise, assign the expression value
+))
+
+# Print the updated `color` column
+unique(res_df$color_personal)
+```
+
+```{r}
+# Preprocess data: Handle p-values and remove NA values
+res_df <- res_df %>%
+  mutate(
+    p_value = ifelse(p_value <= 0, 1e-400, p_value),  # Replace negative/zero p-values with a very small value
+    neg_log10_pval = -log10(p_value)  # Calculate -log10(p-value) for plotting
+  ) %>%
+  filter(!is.na(m_value) & !is.na(p_value))  # Remove rows with NA values in m_value or p_value
+
+
+# Generate volcano plot with legends for lines
+volcano_plot <- ggplot() +
+  # Plot non-significant points
+  geom_point(
+    data = res_df[-indices, ],
+    aes(x = neg_log10_pval, y = m_value, color = color_personal),
+    size = 1, alpha = 0.6
+  ) +
+  # Plot significant points
+  geom_point(
+    data = res_df[indices, ],
+    aes(x = pmin(neg_log10_pval, 200), y = m_value, color = color_personal),
+    size = 1.5
+  ) +
+  # Add labels for significant points
+  geom_text_repel(
+    data = res_df[indices, ],
+    aes(x = pmin(neg_log10_pval, 200), y = m_value, label = label),
+    size = 1.5, max.overlaps = Inf,
+    segment.size = 0.15, min.segment.length = 0.1, box.padding = 0.4
+  ) +
+  # Add threshold lines with legends
+  geom_hline(
+    aes(yintercept = 3.2, linetype = "Strongly upregulated"), color = "red", size = 0.5
+  ) +
+  geom_hline(
+    aes(yintercept = -3.2, linetype = "Strongly repressed"), color = "blue", size = 0.5
+  ) +
+    geom_hline(
+    aes(yintercept = c(-0.585, 0.585), linetype = "No fold-change"), color = "black", size = 0.5
+  ) +
+  geom_vline(
+    aes(xintercept = 1.3, linetype = "Significance threshold"), color = "black", size = 0.5
+  ) +
+  # Customize line types and add to legend
+  scale_linetype_manual(
+    values = c("Strongly upregulated" = "dashed", "Strongly repressed" = "dashed", "No fold-change" = "dashed",  "Significance threshold" = "dotted"),
+    guide = guide_legend(title = "Thresholds")
+  ) +
+  # Customize colors for regulons
+  scale_color_manual(
+    values = c(
+      "No fold-changes" = "#dadada",
+      "Significantly upregulated" = "#dadada",
+      "Strongly upregulated" = "#dadada",
+      "Significantly repressed" = "#dadada",
+      "Strongly repressed" = "#dadada",
+      "MgrA" = "#00FFFF", "PurR" = "#89CFF0", "PyrR" = "#0000FF", "TraP" = "#40E0D0",
+      "ArgR" = "#6495ED", "SaeRs" = "#00A36C", "SarA" = "#5D3FD3", "CymR" = "#CCCCFF",
+      "PerR" = "#DA70D6", "Fur" = "#FF5F1F", "CsoR" = "#800080", "CstR" = "#AA98A9",
+      "Zur" = "#880808", "GraRS" = "#7F00FF", "CodY" = "#E30B5C", "QsrR" = "#E3735E",
+      "SigB" = "#FFFF00", "HrcA" = "#F4C430", "CcpA" = "#ffe974", "AgrA" = "#0FFF50",
+      "CidR" = "#AFE1AF", "TetR" = "#008000", "MhqR" = "#454B1B", "FruR" = "#FBCEB1",
+      "LexA" = "#ff895e", "HypR" = "#FFB6C1", "CtsR" = "#FF00FF", "SaeRS" = "#25806b"
+    ),
+    breaks = c(
+      "TetR", "HypR", "MhqR", "CidR", "QsrR", "CtsR", "HrcA", "CymR", "PerR",
+      "Fur", "CsoR", "CstR", "Zur", "PurR", "GraRS", "CodY", "TraP", "SigB",
+      "MgrA", "CcpA", "AgrA", "ArgR", "SaeRS", "SarA", "FruR", "LexA", "PyrR"
+    ),
+    guide = guide_legend(title = "Regulons")
+  ) +
+  # Add labels and axes scales
+  labs(
+    title = "Volcano Plot Highlighting Gene, Operon and Regulon Expression Levels in the AGXX® Transcriptome",
+    x = "-log10(p-value)",
+    y = "M-value (log2 fold change)"
+  ) +
+  scale_y_continuous(limits = c(-6, 6), breaks = seq(-6, 6, by = 1)) +
+  scale_x_continuous(limits = c(0, 200), breaks = seq(0, 200, by = 25)) +
+  theme_minimal()
+
+# Save the volcano plot as a high-resolution JPEG
+jpeg(
+  filename = paste0(rootDir, "results/figures/volcano_plot.jpg"),
+  width = 20, height = 16, units = "cm", res = 700
+)
+print(volcano_plot)  # Print the plot
+dev.off()  # Close the device
+
+# Display the plot in RStudio Viewer
+volcano_plot
+
+```
+
+*This volcano plot visualizes the differential expression of genes in Staphylococcus aureus under AGXX® stress. The x-axis represents the statistical significance of expression changes as* −log⁡10(p-value)*, and the y-axis represents the magnitude of these changes as* log⁡2(fold change*, referred to as the M-value. Each point corresponds to a gene, with colors indicating the associated regulon. Genes not associated with a regulon are displayed in gray. Labels corresponding to operons are assigned only to genes with the most significant fold change within their operon groups.*
+
+*Threshold lines provide additional context for interpretation. The vertical dotted black line at* −log⁡10(p-value)=1.3 *corresponds to a significance level of* p\<0.05*. The horizontal dashed black lines at* M=±0.585 *indicate the boundaries for genes that are not significantly upregulated or downregulated, corresponding to a fold change of 2/3 or 3/2. The red dashed horizontal line represents the threshold for strong upregulation, where* M=3.32*, corresponding to a fold change of 10. The blue dashed horizontal line represents the threshold for strong downregulation, where* M=−3.32*, corresponding to a fold change of 0.1. Together, these features highlight the statistical significance and biological relevance of differential gene expression under AGXX® stress.*
+
+### Heatmap
+
+The MA plot allows us to visualize fold-change differences between conditions, while a heatmap is useful for comparing expression values for individual samples. In this case, we will visualize regulon expression, which aggregates gene expression data based on the regulon.
+
+To visualize regulon expression, we first need to apply the regularized log transformation (rlog) to the DESeq2 dataset (`dds`). The rlog transformation helps stabilize variance across samples, particularly for genes with low counts. This is important for clustering and making the differences between samples more interpretable. For visualizations like heatmaps, this transformation is useful, but for the MA plot, we don't need it because the input data has already been normalized through DESeq2's statistical model.
+
+We begin by applying the rlog transformation to our dataset:
+
+```{r}
+# Apply regularized log transformation (rlog) to the DESeq2 dataset (dds)
+rlog_transformed <- rlog(dds)
+```
+
+Next, we extract the rlog-transformed data as a matrix using the `assay()` function. This matrix will contain the log-transformed gene expression values with variance stabilization.
+
+```{r}
+# Extract rlog-transformed data as a matrix
+rlog_matrix <- assay(rlog_transformed)
+```
+
+The output is a matrix where each row represents a gene (indexed by its `locus_tag`), and each column represents a sample (such as `ERR2713020`, `ERR2713021`, etc.).
+
+Once we have the rlog-transformed data, the next step is to merge it with additional information from the results dataframe (`res_df`). We can select the `regulon` column and merge it with our rlog-transformed data based on the `locus_tag`, which is a common key between the two datasets:
+
+```{r}
+# Convert rlog-transformed matrix to a data frame with "locus_tag" as a column
+rlog_df <- as.data.frame(rlog_matrix) %>%
+  rownames_to_column(var = "locus_tag")  # Add "locus_tag" as column for merging with other data
+
+# Select relevant columns ("locus_tag" and "regulon") from the results data frame
+results_subset <- res_df %>%
+  select(locus_tag, regulon)  # Keep only necessary columns
+
+# Merge rlog-transformed data with results data frame based on "locus_tag"
+rlog_df <- inner_join(
+  results_subset, 
+  rlog_df, 
+  by = "locus_tag"  # Join datasets on the "locus_tag" column
+)
+```
+
+With the merged data, we can now aggregate the expression values by regulon. This step is important because we want to see the average expression for all genes within the same regulon. To do this, we group the data by `regulon` and calculate the mean expression for each sample across all genes within that regulon:
+
+```{r}
+# Aggregate rlog data by regulon and compute the mean expression for each sample
+regulon_df <- rlog_df %>%
+  group_by(regulon) %>%  # Group by "regulon"
+  summarize(across(starts_with("ERR"), \(x) mean(x, na.rm = TRUE)))  # Compute mean for samples
+
+```
+
+Here, we use `across()` to apply the `mean()` function across all columns that start with "ERR" (the sample identifiers). The `na.rm = TRUE` argument ensures that any missing values are ignored during the averaging process.
+
+After aggregating the data, we need to remove any rows where the `regulon` is missing (NA). These rows likely correspond to genes not assigned to a regulon, and we don't want to include them in the heatmap visualization. We then convert the cleaned data into a matrix format, with the regulons as row names, making it ready for heatmap visualization:
+
+```{r}
+# Convert the aggregated data into a matrix for heatmap visualization
+regulon_matrix <- regulon_df %>%
+  filter(!is.na(regulon))%>% # Remove rows with NA in "regulon"
+  column_to_rownames("regulon") %>%  # Set "regulon" as row names
+  as.matrix()  # Convert data frame to matrix format
+```
+
+Finally, we can generate the heatmap using the `pheatmap` function. This function performs hierarchical clustering on both the rows (regulons) and columns (samples) and scales the rows to normalize the expression values.
+
+```{r}
+# Create column annotation for the heatmap
+annotation_col <- colData %>%
+  as_tibble() %>%
+  select(ena_run, compound) %>%
+  column_to_rownames("ena_run")
+
+# Rename column and its values
+colnames(annotation_col)[colnames(annotation_col) == "compound"] <- "Condition"
+annotation_col <- annotation_col %>%
+  mutate(Condition = case_when(
+    Condition == "none" ~ "Control",
+    Condition == "AgXX373" ~ "AGXX® Treatment"
+  ))
+
+# Set factor levels for Condition
+annotation_col$Condition <- factor(annotation_col$Condition, levels = c("Control", "AGXX® Treatment"))
+
+# Generate heatmap
+regulon_heatmap <- pheatmap(
+  mat = regulon_matrix, 
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  scale = "row", 
+  show_rownames = TRUE, 
+  show_colnames = TRUE,
+  annotation_col = annotation_col,
+  # annotation_colors = condition_colors,
+  color = brewer.pal(8, "RdBu"),
+  fontsize_row = 8,
+  angle_row = 45,
+  height = 0.5,
+  width = 0.5,
+  main = "Log2(FC) of Regulons in S. aureus USA300 Exposed to AGXX®"
+)
+
+# Save heatmap as a JPEG file
+jpeg(paste0(rootDir, "/results/figures/regulons_heatmap.jpg"), width = 20, height = 16, units = "cm", res = 700)
+regulon_heatmap
+# Close device
+dev.off()
+regulon_heatmap
+```
+
+This will generate a heatmap where each row represents a regulon, and each column represents a sample. The colors in the heatmap correspond to the relative expression values for each regulon across the different samples.
+
+In summary, we've applied the rlog transformation to stabilize variance, merged it with regulon information, aggregated expression values by regulon, cleaned the data, and visualized it with a heatmap. This approach provides a clear overview of how regulon expression varies across different samples.
+
+## Results Comparison
+
+Create a table merging our results and the paper's results:
+
+```{r}
+# Prepare and merge datasets
+paper_results <- supplementary_material1 %>%
+  select(usa300_numbers, regulon, gene_symbol, base_mean, a_value, m_value, fold_change, standard_error, 
+         wald_statistic, p_value, adjusted_p_value) %>%
+  column_to_rownames(var = "usa300_numbers")
+
+personal_results <- res_df %>%
+  select(locus_tag, base_mean, a_value, m_value, fold_change, standard_error, 
+         wald_statistic, p_value, adjusted_p_value) %>%
+  column_to_rownames(var = "locus_tag")
+
+merged_results <- merge(paper_results, personal_results, by = "row.names", suffixes = c("_paper", "_personal")) %>%
+  column_to_rownames(var = "Row.names")
+
+# Preview the merged results
+head(merged_results)
+```
+
+#### Statistical significance of our results
+
+```{r}
+# Calculate and print correlation and t-test for log2FoldChange values
+cor_log2FC <- cor(merged_results$m_value_paper, merged_results$m_value_personal, method = "pearson")
+t_test_log2FC <- t.test(merged_results$m_value_paper, merged_results$m_value_personal, paired = TRUE)
+
+cat("Pearson correlation of log2 fold changes (m-value):", cor_log2FC, "\n")
+print(t_test_log2FC)
+```
+
+*Based on the results, we were largely able to reproduce the study:*
+
+*The exceptionally strong Pearson correlation of 0.95 indicates that the overall trends and rankings of log2 fold changes between our analysis and the study's results are highly consistent. This suggests that the key relationships and patterns in the data were successfully replicated.*
+
+*The p-value of 0.057 is slightly above the common significance threshold of 0.05, and the 95% confidence interval \[-0.0451, 0.0007\] includes 0. As a result, we fail to reject the null hypothesis that there is no difference in the mean log2 fold changes between the two datasets. This provides strong statistical evidence that there is no meaningful difference in the mean log2 fold changes between our results and those of the study.*
+
+*In conclusion, we successfully reproduced the study’s findings in terms of overall trends and gene rankings. Minor differences in mean log2 fold changes likely arise from variations in pipeline parameters or methodological choices, but these discrepancies do not undermine the overall reproducibility of the study.*
+
+#### Visualize the differences between our results and theirs by generating a scatterplot of the M-values
+
+```{r}
+# Fit the linear model and create equation label
+lm_fit <- lm(m_value_personal ~ m_value_paper, data = merged_results)
+line_eq <- sprintf("y = %.2fx + %.2f\nR² = %.3f", coef(lm_fit)[2], coef(lm_fit)[1], summary(lm_fit)$r.squared)
+
+# Create and save the scatter plot
+scatterplot_paper_vs_personal <- ggplot(merged_results, aes(x = m_value_paper, y = m_value_personal)) +
+  geom_point(color = "black", size = 1) +
+  geom_smooth(method = "lm", color = "red", size = 1, se = TRUE) +
+  labs(
+    x = "log2 Fold Change (Paper)", 
+    y = "log2 Fold Change (Personal)", 
+    title = "Comparison of log2 Fold Changes"
+  ) +
+  annotate("text", x = min(merged_results$m_value_paper), y = max(merged_results$m_value_personal), 
+           label = line_eq, hjust = 0, vjust = 1, size = 5, color = "black") +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+ggsave(
+  paste0(rootDir, "/results/figures/plot_m_value.jpg"), 
+  scatterplot_paper_vs_personal, width = 20, height = 16, units = "cm", dpi = 700
+)
+```
